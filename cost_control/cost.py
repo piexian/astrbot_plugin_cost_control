@@ -3,7 +3,7 @@
 根据生效的定价结构（:func:`cost_control.config.get_pricing` 返回的
 ``{"defaults", "user"}``）把 token 用量 / 调用次数 / 请求数换算为 USD 成本。
 
-支持三种计费模式（``mode``）：
+支持五种计费模式（``mode``）：
 - ``per_token``：按 input / input_cached / output（+cache_creation）token 计费，
   USD / 百万 token。内置 ``DEFAULT_PRICING`` 即此模式（按模型名匹配）。
 - ``per_turn``：每次 LLM 调用（每条 ProviderStat / CostSupplement 记录）固定 USD/次，
@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
-from .config import get_pricing
+from .config import get_enabled_price_sources, get_pricing
 
 
 @lru_cache(maxsize=4096)
@@ -171,46 +171,121 @@ def resolve_pricing(
 def _resolve_selection(
     provider_id: str | None, model: str | None, pricing: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """从候选选择取 ``price_key`` → ``catalog`` 规则（无则 None）。"""
+    """解析确认选择；缺失时只应用唯一高置信的目录候选。"""
     if not provider_id or not model or not isinstance(pricing, dict):
         return None
     selections = pricing.get("selections")
     catalog = pricing.get("catalog")
-    if not isinstance(selections, dict) or not isinstance(catalog, dict):
+    if isinstance(selections, dict) and isinstance(catalog, dict):
+        per_model = selections.get(provider_id)
+        if isinstance(per_model, dict):
+            sel = per_model.get(model)
+            if isinstance(sel, dict):
+                price_key = sel.get("price_key")
+                price = catalog.get(price_key) if price_key else None
+                if isinstance(price, dict):
+                    return _catalog_price_to_rule(price)
+
+    # 自动匹配不落盘，运行时使用目录中的唯一高置信候选。用户确认选择始终优先。
+    catalog_obj = pricing.get("catalog_obj")
+    if catalog_obj is None:
         return None
-    per_model = selections.get(provider_id)
-    if not isinstance(per_model, dict):
+    try:
+        from .price_catalog import select_auto_candidate
+
+        enabled_sources = pricing.get("enabled_sources")
+        source_filter = (
+            set(enabled_sources) if isinstance(enabled_sources, (list, set, tuple)) else None
+        )
+        auto = select_auto_candidate(catalog_obj.find_candidates(model, sources=source_filter))
+        if auto is not None:
+            return _catalog_price_to_rule(auto.price.to_dict())
+    except Exception:
+        pass
+    return None
+
+
+def _catalog_field_values(price: dict[str, Any]) -> dict[str, Any]:
+    """把目录的 prompt/completion 字段映射为计费规则的 input/output 字段。"""
+    output = price.get("output")
+    if output is None:
+        output = price.get("completion")
+    return {
+        "input": price.get("input") if price.get("input") is not None else price.get("prompt"),
+        "input_cached": (
+            price.get("input_cached")
+            if price.get("input_cached") is not None
+            else (
+                price.get("cache_read")
+                if price.get("cache_read") is not None
+                else price.get("cache")
+            )
+        ),
+        "output": output,
+        "cache_creation": price.get("cache_creation"),
+    }
+
+
+def _catalog_context_tier_to_rule(tier: dict[str, Any]) -> dict[str, Any] | None:
+    """将 catalog context tier 转为 per_tier 的用户规则字段。"""
+    try:
+        threshold = int(tier.get("threshold_tokens"))
+    except (TypeError, ValueError):
         return None
-    sel = per_model.get(model)
-    if not isinstance(sel, dict):
+    return {"threshold_tokens": threshold, **_catalog_field_values(tier)}
+
+
+def _catalog_service_tier_to_rule(
+    tier: dict[str, Any], base: dict[str, Any]
+) -> dict[str, Any] | None:
+    """将 catalog service tier 的绝对单价换算为 per_tier 的字段倍率。"""
+    match = str(tier.get("match") or tier.get("service_tier") or "").strip()
+    if not match:
         return None
-    price_key = sel.get("price_key")
-    price = catalog.get(price_key) if price_key else None
-    if not isinstance(price, dict):
-        return None
-    return _catalog_price_to_rule(price)
+    out: dict[str, Any] = {"match": match}
+    absolute = _catalog_field_values(tier)
+    for field in _PER_TOKEN_FIELDS:
+        multiplier_key = f"{field}_multiplier"
+        if tier.get(multiplier_key) is not None:
+            out[multiplier_key] = tier[multiplier_key]
+            continue
+        value = absolute.get(field)
+        base_value = base.get(field)
+        if value is None or base_value in (None, 0):
+            continue
+        try:
+            out[multiplier_key] = float(value) / float(base_value)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+    return out if len(out) > 1 else None
 
 
 def _catalog_price_to_rule(price: dict[str, Any]) -> dict[str, Any] | None:
-    """把 catalog 价格条目转为 resolve 规则（字段缺省为 None，由计算层回退）。"""
+    """把目录价格条目转为内部计费规则，兼容 catalog 与用户规则的不同字段名。"""
     mode = str(price.get("mode") or "per_token")
     cur = str(price.get("currency") or "USD").strip().upper() or "USD"
     if mode == "per_token":
-        return {
-            "mode": "per_token",
-            "currency": cur,
-            "input": price.get("input"),
-            "input_cached": price.get("input_cached"),
-            "output": price.get("output"),
-            "cache_creation": price.get("cache_creation"),
-        }
+        return {"mode": "per_token", "currency": cur, **_catalog_field_values(price)}
     if mode == "per_tier":
+        base = _catalog_field_values(price)
+        context_tiers = [
+            converted
+            for raw in (price.get("context_tiers") or [])
+            if isinstance(raw, dict)
+            if (converted := _catalog_context_tier_to_rule(raw)) is not None
+        ]
+        service_tiers = [
+            converted
+            for raw in (price.get("service_tiers") or [])
+            if isinstance(raw, dict)
+            if (converted := _catalog_service_tier_to_rule(raw, base)) is not None
+        ]
         return {
             "mode": "per_tier",
             "currency": cur,
-            "base": price.get("base") or {},
-            "context_tiers": price.get("context_tiers") or [],
-            "service_tiers": price.get("service_tiers") or [],
+            "base": base,
+            "context_tiers": context_tiers,
+            "service_tiers": service_tiers,
         }
     if mode == "tiered_expr":
         return {"mode": "tiered_expr", "expr": price.get("expr"), "currency": cur}
@@ -582,17 +657,26 @@ class CostMixin:
         ``catalog``/``selections`` 供 :func:`resolve_pricing` 做候选价格解析；目录不可用或
         损坏时降级为空（仅靠 defaults/user），保证成本计算永不被打断。
         """
-        pricing = get_pricing(getattr(self, "cfg", None))
-        data_dir = getattr(self, "data_dir", None)
-        if data_dir:
-            try:
-                from .price_catalog import PriceCatalog
+        cfg = getattr(self, "cfg", None)
+        pricing = get_pricing(cfg)
+        pricing["enabled_sources"] = get_enabled_price_sources(cfg)
+        try:
+            from .config import get_price_selections
+            from .price_catalog import load_catalog
 
-                catalog = PriceCatalog(str(data_dir))
-                pricing["catalog"] = dict(catalog.prices)
-                pricing["selections"] = {p: dict(m) for p, m in catalog.selections.items()}
-            except Exception:
-                pass
+            pricing["selections"] = get_price_selections(cfg)
+            data_dir = getattr(self, "_data_dir", None)
+            if not data_dir:
+                get_data_dir = getattr(self, "get_data_dir", None)
+                data_dir = str(get_data_dir()) if callable(get_data_dir) else None
+            if data_dir:
+                catalog = load_catalog(str(data_dir))
+                pricing["catalog"] = {
+                    price_key: price.to_dict() for price_key, price in catalog.prices.items()
+                }
+                pricing["catalog_obj"] = catalog
+        except Exception:
+            pass
         return pricing
 
     def get_main_currency(self) -> str:

@@ -154,10 +154,19 @@ def test_newapi_defaults_when_ratios_missing():
     assert p.configured["completion"] is False  # 缺省派生，非显式配置
 
 
-def test_newapi_fixed_price():
+def test_newapi_fixed_price(tmp_path):
     raw = {"data": [{"model_name": "img", "quota_type": 1, "model_price": 0.03}]}
     p = ps.adapt_newapi(raw, "newapi:us")["img"]
     assert p.mode == "per_turn"
+    assert p.price == pytest.approx(0.03)
+
+    from cost_control.price_catalog import PriceCatalog
+
+    catalog = PriceCatalog()
+    catalog.replace_source_prices("newapi:us", {p.source_model_id: p})
+    catalog.save(str(tmp_path))
+    loaded = load_catalog(str(tmp_path))
+    assert loaded.prices[p.price_key].price == pytest.approx(0.03)
 
 
 def test_newapi_tiered_expr_preserved():

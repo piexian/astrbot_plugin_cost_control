@@ -4,15 +4,19 @@ import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
 import type {
+  CandidateBrief,
   MatchedDefault,
   PriceEntry,
+  PriceSelection,
   PricingUnpriced,
   ProviderModelInfo,
+  SourceStatus,
   UserPricingEntry,
 } from "../lib/types";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
 import { SaveToast } from "../components/SaveToast";
+import { Segmented } from "../components/Segmented";
 import { Loading, ErrorBox } from "../components/Feedback";
 import {
   DraftEntry,
@@ -21,6 +25,18 @@ import {
   entryToDraft,
   isDraftEmpty,
 } from "../components/ProviderPricingCard";
+import { SourceStatusBar } from "../components/price/SourceStatusBar";
+
+// 卡片筛选（F6.7）：按生效价格来源归类
+type PricingFilter = "all" | "unpriced" | "candidates" | "selected" | "manual";
+
+const FILTER_OPTIONS: { value: PricingFilter; label: string }[] = [
+  { value: "all", label: "全部" },
+  { value: "unpriced", label: "未定价" },
+  { value: "candidates", label: "待选候选" },
+  { value: "selected", label: "已选源" },
+  { value: "manual", label: "手工定价" },
+];
 
 export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const res = useApi(() => api.getPricing(), [refreshNonce]);
@@ -38,6 +54,11 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const [unpricedOverride, setUnpricedOverride] = useState<
     PricingUnpriced[] | null
   >(null);
+  const [filter, setFilter] = useState<PricingFilter>("all");
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
+  const [selecting, setSelecting] = useState(false);
+  const [autoSync, setAutoSync] = useState(false);
 
   useEffect(() => {
     if (!data) return;
@@ -51,9 +72,35 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     setUnpricedOverride(null); // 新数据到达时清除覆盖
   }, [data]);
 
+  useEffect(() => {
+    let mounted = true;
+    void api
+      .getConfig()
+      .then((config) => {
+        const priceSync = config.price_sync;
+        const enabled =
+          typeof priceSync === "object" &&
+          priceSync !== null &&
+          (priceSync as Record<string, unknown>).auto_enabled === true;
+        if (mounted) setAutoSync(enabled);
+      })
+      .catch(() => {
+        // 读取失败时保持默认关闭；不影响手动同步。
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [refreshNonce]);
   const providerModels: ProviderModelInfo[] = data?.provider_models || [];
   const defaults: Record<string, PriceEntry> = data?.defaults || {};
   const unpriced = unpricedOverride ?? data?.unpriced ?? [];
+  const sources: Record<string, SourceStatus> = data?.sources || {};
+  const selections: Record<string, Record<string, PriceSelection>> =
+    data?.selections || {};
+  const candidateMap: Record<string, Record<string, CandidateBrief[]>> =
+    data?.candidates || {};
+  const autoSelected: Record<string, Record<string, string>> =
+    data?.auto_selected || {};
 
   // 当前配置中的 provider ID 集合
   const configIds = useMemo(
@@ -84,6 +131,20 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const shortName = (id: string) => {
     const i = id.lastIndexOf("/");
     return i >= 0 ? id.slice(i + 1) : id;
+  };
+
+  // provider 是否已有生效的价格来源（已选或自动匹配）
+  const hasSourceSelection = (pid: string) => {
+    const sel = selections[pid];
+    if (sel && Object.keys(sel).length > 0) return true;
+    const auto = autoSelected[pid];
+    return !!auto && Object.keys(auto).length > 0;
+  };
+
+  // provider 是否存在待选候选
+  const hasCandidates = (pid: string) => {
+    const m = candidateMap[pid];
+    return !!m && Object.values(m).some((arr) => arr && arr.length > 0);
   };
 
   // 原始显示列表（去重前）
@@ -146,6 +207,27 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providerModels, orphanIds, historicalIds]);
+
+  // 筛选后的卡片列表（F6.7）
+  const filteredList = useMemo(() => {
+    if (filter === "all") return displayList;
+    return displayList.filter((p) => {
+      const manual = !isDraftEmpty(ensureDraft(p.id));
+      switch (filter) {
+        case "manual":
+          return manual;
+        case "selected":
+          return !manual && hasSourceSelection(p.id);
+        case "candidates":
+          return hasCandidates(p.id);
+        case "unpriced":
+          return !manual && !p.matchedDefault && !hasSourceSelection(p.id);
+        default:
+          return true;
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayList, filter, drafts, selections, autoSelected, candidateMap]);
 
   // 未定价告警按 provider_id 分组（去重后），用于可点击跳转
   const unpricedByProvider = useMemo(() => {
@@ -244,6 +326,125 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     { enabled: ready },
   );
 
+  // ---- 价格源操作（F1/F2） ----
+
+  const doSync = async (sourceIds?: string[]) => {
+    setSyncing(true);
+    setSyncMsg("同步中…");
+    try {
+      const r = await api.postPricingSync(sourceIds);
+      const failed = r.results.filter((s) => s.status === "error");
+      const updated = r.results.reduce((sum, s) => sum + s.models, 0);
+      const tail = failed.length > 0 ? `；${failed.length} 个源失败` : "";
+      setSyncMsg(`✅ 已同步 ${updated} 个模型${tail}`);
+      res.refetch();
+    } catch (e) {
+      setSyncMsg(`❌ 同步失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const toggleAutoSync = async (enabled: boolean) => {
+    try {
+      const cfg = await api.getConfig();
+      const priceSync = { ...((cfg.price_sync as Record<string, unknown>) ?? {}) };
+      priceSync.auto_enabled = enabled;
+      await api.postSaveConfig({ price_sync: priceSync });
+      setAutoSync(enabled);
+      setSyncMsg(enabled ? "已启用每日自动同步" : "已关闭每日自动同步");
+    } catch (e) {
+      setSyncMsg(`❌ 更新自动同步失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // 源开关：读最新 config → 改 price_sources → 保存 → 启用时立即拉该源
+  const toggleSource = async (sourceId: string, enabled: boolean) => {
+    try {
+      const cfg = await api.getConfig();
+      const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
+      const entry = { ...((ps[sourceId] as Record<string, unknown>) ?? {}) };
+      entry.enabled = enabled;
+      if (sourceId.startsWith("newapi:") && !entry.provider_id) {
+        entry.provider_id = sourceId.slice(7);
+        entry.use_provider_key = true;
+      }
+      ps[sourceId] = entry;
+      await api.postSaveConfig({ price_sources: ps });
+      if (enabled) {
+        await doSync([sourceId]);
+      } else {
+        res.refetch();
+      }
+    } catch (e) {
+      setSyncMsg(`❌ 更新价格源失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // 探测并启用 New API 源（F1.2/F6.2）
+  const enableNewApiSource = async (pid: string) => {
+    setSelecting(true);
+    setSyncMsg(`探测 ${pid} …`);
+    try {
+      const det = await api.postPricingDetect(pid);
+      if (!det.is_newapi) {
+        setSyncMsg(`❌ ${pid} 未检测到 New API /api/pricing 接口`);
+        return;
+      }
+      const cfg = await api.getConfig();
+      const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
+      ps[`newapi:${pid}`] = {
+        enabled: true,
+        provider_id: pid,
+        base_url: det.base_url ?? "",
+        use_provider_key: true,
+      };
+      await api.postSaveConfig({ price_sources: ps });
+      setSyncMsg(`✅ ${pid} 已启用为 New API 源，正在拉取价格…`);
+      await doSync([`newapi:${pid}`]);
+    } catch (e) {
+      setSyncMsg(`❌ 探测失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSelecting(false);
+    }
+  };
+
+  const disableNewApiSource = async (pid: string) => {
+    await toggleSource(`newapi:${pid}`, false);
+    setSyncMsg(`已停用 New API 源 ${pid}（已确认的选择不受影响）`);
+  };
+
+  const selectCandidate = async (pid: string, model: string, priceKey: string) => {
+    setSelecting(true);
+    try {
+      await api.postPricingSelect({ provider_id: pid, model, price_key: priceKey });
+      res.refetch();
+    } catch (e) {
+      setSyncMsg(`❌ 选用失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSelecting(false);
+    }
+  };
+
+  const resetSelection = async (pid: string, model: string) => {
+    setSelecting(true);
+    try {
+      await api.postPricingSelectReset({ provider_id: pid, model });
+      res.refetch();
+    } catch (e) {
+      setSyncMsg(`❌ 清除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSelecting(false);
+    }
+  };
+
+  // provider 对应的 New API 源状态（有配置才显示开关行）
+  const newApiSourceFor = (pid: string) => {
+    const sid = `newapi:${pid}`;
+    const st = sources[sid];
+    if (st) return { sourceId: sid, enabled: !!st.enabled };
+    return undefined;
+  };
+
   if (res.loading && !data) return <Loading />;
   if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
@@ -281,10 +482,26 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
 
   // 统计概要数字
   const totalProviders = displayList.length;
-  const unmatchedCount = displayList.filter((p) => !p.matchedDefault).length;
+  const unmatchedCount = displayList.filter(
+    (p) => !p.matchedDefault && !hasSourceSelection(p.id),
+  ).length;
+  const candidateProviderCount = displayList.filter((p) => hasCandidates(p.id)).length;
 
   return (
     <div>
+      <Panel className="source-panel">
+        <h2>价格源</h2>
+        <SourceStatusBar
+          sources={sources}
+          syncing={syncing}
+          onSync={() => void doSync()}
+          onToggleSource={(sid, en) => void toggleSource(sid, en)}
+          autoSync={autoSync}
+          onToggleAutoSync={(enabled) => void toggleAutoSync(enabled)}
+        />
+        {syncMsg && <div className="muted small source-sync-msg">{syncMsg}</div>}
+      </Panel>
+
       {unpriced.length > 0 && (
         <Panel className="alert-panel">
           <h2>未定价告警（{unpricedByProvider.length} 个 Provider）</h2>
@@ -325,14 +542,27 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
             <span className="muted small">{totalProviders} 个 Provider</span>
             {unmatchedCount > 0 && (
               <span className="pricing-unmatched-count">
-                {unmatchedCount} 个无内置匹配
+                {unmatchedCount} 个无价格匹配
+              </span>
+            )}
+            {candidateProviderCount > 0 && (
+              <span className="pricing-unmatched-count">
+                {candidateProviderCount} 个有待选候选
               </span>
             )}
           </div>
         </div>
         <div className="muted small" style={{ marginBottom: 8 }}>
-          按 <strong>provider_id</strong> 设置定价。未设置时按模型名匹配内置默认。
+          按 <strong>provider_id</strong> 设置定价。未设置时依次使用：已选价格源 → 自动匹配 → 内置默认。
           修改后自动保存、即时热生效，告警同步更新。
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <Segmented
+            options={FILTER_OPTIONS}
+            value={filter}
+            onChange={(v) => setFilter(v as PricingFilter)}
+            variant="weak"
+          />
         </div>
         {displayList.length === 0 && (
           <div className="muted small" style={{ margin: "8px 0" }}>
@@ -340,25 +570,45 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
           </div>
         )}
         <div className="overrides-list">
-          {displayList.map((p) => (
-            <ProviderPricingCard
-              key={p.id}
-              providerId={p.id}
-              displayId={p.displayId}
-              type={p.type}
-              candidates={p.candidates}
-              draft={ensureDraft(p.id)}
-              matchedDefault={p.matchedDefault}
-              hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
-              isHistorical={p.isHistorical}
-              hasUsage={hasUnpricedUsage(p.id)}
-              highlightSignal={
-                highlightTarget === p.id ? highlightSignal : undefined
-              }
-              onChange={(patch) => updateDraft(p.id, patch)}
-              onClear={() => clearDraft(p.id)}
-            />
-          ))}
+          {filteredList.map((p) => {
+            return (
+              <ProviderPricingCard
+                key={p.id}
+                providerId={p.id}
+                displayId={p.displayId}
+                type={p.type}
+                candidates={p.candidates}
+                draft={ensureDraft(p.id)}
+                matchedDefault={p.matchedDefault}
+                hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
+                isHistorical={p.isHistorical}
+                hasUsage={hasUnpricedUsage(p.id)}
+                highlightSignal={
+                  highlightTarget === p.id ? highlightSignal : undefined
+                }
+                selections={selections[p.id]}
+                autoPriceKeys={autoSelected[p.id]}
+                priceCandidatesByModel={candidateMap[p.id]}
+                newApiSource={p.isHistorical ? undefined : newApiSourceFor(p.id)}
+                selecting={selecting}
+                onSelectCandidate={(m, pk) => selectCandidate(p.id, m, pk)}
+                onResetSelection={(m) => resetSelection(p.id, m)}
+                onEnableNewApiSource={
+                  p.isHistorical ? undefined : () => enableNewApiSource(p.id)
+                }
+                onDisableNewApiSource={
+                  p.isHistorical ? undefined : () => disableNewApiSource(p.id)
+                }
+                onChange={(patch) => updateDraft(p.id, patch)}
+                onClear={() => clearDraft(p.id)}
+              />
+            );
+          })}
+          {filteredList.length === 0 && displayList.length > 0 && (
+            <div className="muted small" style={{ margin: "8px 0" }}>
+              当前筛选条件下没有 Provider。
+            </div>
+          )}
         </div>
         <div className="row" style={{ marginTop: 8, gap: 10, alignItems: "center" }}>
           <Button

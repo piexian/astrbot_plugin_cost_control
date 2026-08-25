@@ -45,6 +45,7 @@ class CatalogPrice:
     cache: float | None = None
     cache_read: float | None = None
     cache_creation: float | None = None
+    price: float | None = None
     configured: dict[str, bool] = field(default_factory=dict)
     context_tiers: list[dict[str, Any]] = field(default_factory=list)
     service_tiers: list[dict[str, Any]] = field(default_factory=list)
@@ -72,6 +73,7 @@ class CatalogPrice:
             cache=_opt_float(data.get("cache")),
             cache_read=_opt_float(data.get("cache_read")),
             cache_creation=_opt_float(data.get("cache_creation")),
+            price=_opt_float(data.get("price")),
             configured=_str_bool_dict(data.get("configured")),
             context_tiers=list(data.get("context_tiers") or []),
             service_tiers=list(data.get("service_tiers") or []),

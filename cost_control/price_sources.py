@@ -441,6 +441,7 @@ def _newapi_price(mid: str, item: dict, source: str) -> CatalogPrice | None:
             source=source,
             source_model_id=mid,
             mode="per_turn",
+            price=price,
             configured={
                 "prompt": False,
                 "completion": False,
@@ -554,14 +555,14 @@ class SourceResult:
             "not_modified": self.not_modified,
         }
 
-    def to_status(self, prev: SourceStatus | None) -> SourceStatus:
+    def to_status(self, prev: SourceStatus | None, *, enabled: bool = True) -> SourceStatus:
         """合并成本次要写入目录的 :class:`SourceStatus`。失败保留旧的 models/etag。"""
         prev_models = prev.models if prev else 0
         prev_etag = prev.etag if prev else ""
         keep = self.status != "ok" or self.not_modified
         return SourceStatus(
             source=self.source,
-            enabled=True,
+            enabled=enabled,
             status=self.status,
             updated_at=_now_iso() if self.status == "ok" else (prev.updated_at if prev else ""),
             models=prev_models if keep and prev_models else self.models,
@@ -722,9 +723,10 @@ async def sync_all(
         ``{"ok": bool, "updated_at": str, "results": [SourceResult.to_dict(), ...]}``。
     """
     catalog = load_catalog(data_dir)
-    if sources is None:
-        from .config import get_enabled_price_sources
+    from .config import get_enabled_price_sources, get_price_sources
 
+    source_cfg = get_price_sources(cfg)
+    if sources is None:
         targets = get_enabled_price_sources(cfg)
     else:
         targets = [s for s in sources if isinstance(s, str) and s.strip()]
@@ -754,7 +756,8 @@ async def sync_all(
         prev = catalog.get_source(res.source)
         if res.status == "ok" and not res.not_modified:
             catalog.replace_source_prices(res.source, {p.price_key: p for p in res.prices.values()})
-        catalog.upsert_source(res.to_status(prev))
+        enabled = bool(source_cfg.get(res.source, {}).get("enabled", True))
+        catalog.upsert_source(res.to_status(prev, enabled=enabled))
     catalog.updated_at = _now_iso()
     catalog.save(data_dir)
 

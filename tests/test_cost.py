@@ -380,17 +380,27 @@ def test_per_tier_service_tier_multiplier():
     )
     assert abs(base - (1000 * 1.0 + 100 * 2.0) / 1e6) < 1e-12
     prio = compute_cost_value(
-        {"token_input_other": 1000, "token_output": 100,
-         "billing_context": {"service_tier": "priority"}},
-        "prov", "m", pricing_full(user),
+        {
+            "token_input_other": 1000,
+            "token_output": 100,
+            "billing_context": {"service_tier": "priority"},
+        },
+        "prov",
+        "m",
+        pricing_full(user),
     )
     assert abs(prio - (1000 * 2.0 + 100 * 4.0) / 1e6) < 1e-12
 
 
 def test_per_tier_row_aggregate():
     user = {"prov": _per_tier_rule({"input": 1.0, "output": 2.0})}
-    row = {"provider_id": "prov", "provider_model": "m", "count": 3,
-           "token_input_other": 1_000_000, "token_output": 0}
+    row = {
+        "provider_id": "prov",
+        "provider_model": "m",
+        "count": 3,
+        "token_input_other": 1_000_000,
+        "token_output": 0,
+    }
     assert abs(compute_row_cost(row, pricing_full(user)) - 1.0) < 1e-9
 
 
@@ -413,6 +423,67 @@ def test_tiered_expr_invalid_returns_zero():
 
 def test_tiered_expr_row_aggregate():
     user = {"prov": {"mode": "tiered_expr", "expr": "p * 2"}}
-    row = {"provider_id": "prov", "provider_model": "m", "count": 1,
-           "token_input_other": 1_000_000, "token_output": 0}
+    row = {
+        "provider_id": "prov",
+        "provider_model": "m",
+        "count": 1,
+        "token_input_other": 1_000_000,
+        "token_output": 0,
+    }
     assert abs(compute_row_cost(row, pricing_full(user)) - 2.0) < 1e-9
+
+
+def test_unique_catalog_candidate_applies_without_persisted_selection():
+    """唯一高置信候选应参与实际结算，不只在定价页面展示。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    price = CatalogPrice(
+        source="newapi:gateway",
+        source_model_id="private-model",
+        prompt=3.0,
+        completion=7.0,
+    )
+    catalog = PriceCatalog(prices={price.price_key: price})
+    pricing = pricing_struct()
+    pricing["catalog"] = {price.price_key: price.to_dict()}
+    pricing["catalog_obj"] = catalog
+    usage = {"token_input_other": 1_000_000, "token_output": 1_000_000}
+    assert compute_cost_value(usage, "prov", "private-model", pricing) == 10.0
+
+
+def test_ambiguous_catalog_candidates_do_not_auto_apply():
+    """两个高置信候选不能自动选择，必须留给用户在 WebUI 中确认。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    first = CatalogPrice(source="modelsdev", source_model_id="private-model", prompt=3.0)
+    second = CatalogPrice(source="openrouter", source_model_id="private-model", prompt=4.0)
+    catalog = PriceCatalog(prices={first.price_key: first, second.price_key: second})
+    pricing = pricing_struct()
+    pricing["catalog"] = {
+        first.price_key: first.to_dict(),
+        second.price_key: second.to_dict(),
+    }
+    pricing["catalog_obj"] = catalog
+    assert resolve_pricing("prov", "private-model", pricing) is None
+
+
+def test_disabled_source_does_not_auto_apply_but_confirmed_selection_still_applies():
+    """停用源不自动匹配，但历史确认选择保持有效。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    price = CatalogPrice(
+        source="openrouter", source_model_id="private-model", prompt=3.0, completion=7.0
+    )
+    catalog = PriceCatalog(prices={price.price_key: price})
+    pricing = pricing_struct()
+    pricing["catalog"] = {price.price_key: price.to_dict()}
+    pricing["catalog_obj"] = catalog
+    pricing["enabled_sources"] = []
+    assert resolve_pricing("prov", "private-model", pricing) is None
+
+    pricing["selections"] = {
+        "prov": {"private-model": {"price_key": price.price_key, "confirmed": True}}
+    }
+    rule = resolve_pricing("prov", "private-model", pricing)
+    assert rule is not None
+    assert rule["input"] == 3.0

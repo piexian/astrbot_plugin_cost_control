@@ -242,8 +242,8 @@ def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
     - ``defaults``：内置出厂默认表 ``DEFAULT_PRICING``（key=模型名，隐含 per_token），
       由 :func:`cost_control.cost.match_pricing` 按模型名模糊匹配。
     - ``user``：用户在 ``pricing`` 项配置的覆盖（key=**provider_id**）。每条按
-      ``mode``（``per_token``/``per_turn``/``per_request``）规范化；缺 ``mode`` 视为
-      ``per_token``（兼容旧结构）。优先级高于 defaults——见
+      ``mode``（``per_token``/``per_turn``/``per_request``/``per_tier``/``tiered_expr``）
+      规范化；缺 ``mode`` 视为 ``per_token``（兼容旧结构）。优先级高于 defaults——见
       :func:`cost_control.cost.resolve_pricing`。
 
     Args:
@@ -303,26 +303,48 @@ def get_rate_updated_at(config: dict[str, Any] | None) -> str:
     return _get_at(config)
 
 
-def get_price_sources(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """返回价格源配置（``price_sources``）。
+_PUBLIC_PRICE_SOURCE_IDS = frozenset({"modelsdev", "litellm", "openrouter"})
 
-    形态：``{"<source_id>": {"enabled": bool, ...}}``；非法值回退空 dict。
-    """
-    raw = get_config(config, "price_sources", {}) or {}
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for sid, cfg in raw.items():
-        key = str(sid or "").strip()
-        if not key or not isinstance(cfg, dict):
-            continue
-        out[key] = dict(cfg)
-    return out
+
+def _is_price_source_id(source_id: str) -> bool:
+    """只接受内置公共源或绑定既有 provider 的 New API 动态源。"""
+    return source_id in _PUBLIC_PRICE_SOURCE_IDS or (
+        source_id.startswith("newapi:") and bool(source_id[7:].strip())
+    )
+
+
+def get_price_sources(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """返回完整价格源配置，始终补齐三个公共源默认项。"""
+    return normalize_price_sources(get_config(config, "price_sources", {}))
 
 
 def get_enabled_price_sources(config: dict[str, Any] | None) -> list[str]:
     """返回所有 enabled=True 的价格源 ID（保持配置顺序）。"""
     return [sid for sid, cfg in get_price_sources(config).items() if cfg.get("enabled")]
+
+
+def normalize_price_sources(raw: Any) -> dict[str, dict[str, Any]]:
+    """规范化 ``price_sources``（保留 ``newapi:<pid>`` 等动态键，纯函数）。
+
+    公共源固定保留（默认 enabled）；每个条目强转 ``enabled`` 为 bool，
+    其余字段（provider_id/base_url/use_provider_key）原样保留。非法源 ID 丢弃。
+    """
+    base = get_config(CONFIG_DEFAULTS, "price_sources", {}) or {}
+    out: dict[str, dict[str, Any]] = {
+        sid: {"enabled": bool(cfg.get("enabled", True))}
+        for sid, cfg in base.items()
+        if isinstance(cfg, dict) and sid in _PUBLIC_PRICE_SOURCE_IDS
+    }
+    if not isinstance(raw, dict):
+        return out
+    for sid, cfg in raw.items():
+        key = str(sid or "").strip()
+        if not _is_price_source_id(key) or not isinstance(cfg, dict):
+            continue
+        entry = dict(cfg)
+        entry["enabled"] = bool(entry.get("enabled", True))
+        out[key] = entry
+    return out
 
 
 def get_price_selections(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

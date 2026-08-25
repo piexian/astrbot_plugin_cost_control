@@ -1472,11 +1472,28 @@ class WebApiMixin:
             candidates: dict[str, Any] = {}
             auto_selected: dict[str, Any] = {}
             try:
-                from .config import get_price_selections
+                from .config import get_price_selections, get_price_sources
                 from .price_catalog import select_auto_candidate
 
                 cat = self._load_catalog()
+                configured_sources = get_price_sources(_pcfg)
+                enabled_sources = {
+                    sid for sid, config in configured_sources.items() if config.get("enabled")
+                }
                 sources_status = {sid: s.to_dict() for sid, s in cat.sources.items()}
+                for sid, config in configured_sources.items():
+                    status = sources_status.setdefault(
+                        sid,
+                        {
+                            "source": sid,
+                            "status": "pending",
+                            "models": 0,
+                            "skipped": 0,
+                            "error": "",
+                            "not_modified": False,
+                        },
+                    )
+                    status["enabled"] = bool(config.get("enabled"))
                 selections = get_price_selections(_pcfg)
                 for p in provider_models:
                     pid = p.get("id") or ""
@@ -1496,7 +1513,7 @@ class WebApiMixin:
                         psel = selections.get(pid, {})
                         if isinstance(psel, dict) and psel.get(m, {}).get("confirmed"):
                             continue  # 用户已确认，不再进候选/自动匹配
-                        cands = cat.find_candidates(m)
+                        cands = cat.find_candidates(m, sources=enabled_sources)
                         if not cands:
                             continue
                         auto = select_auto_candidate(cands)
@@ -1563,6 +1580,7 @@ class WebApiMixin:
             "completion": p.completion,
             "cache_read": p.cache_read,
             "cache_creation": p.cache_creation,
+            "price": p.price,
             "context_tiers": len(p.context_tiers or []),
             "service_tiers": len(p.service_tiers or []),
             "expr": (p.expr or "")[:120] if p.mode == "tiered_expr" else "",
@@ -1782,11 +1800,21 @@ class WebApiMixin:
             if not expr:
                 return self._err("缺少 expr")
             try:
-                from .expr_eval import validate_tiered_expr
+                from .expr_eval import eval_tiered_expr, validate_tiered_expr
             except Exception:
                 return self._err("表达式引擎未就绪（P2 待实现）")
             err = validate_tiered_expr(expr)
-            return self._ok({"valid": not err, "error": err or ""})
+            if err:
+                return self._ok({"valid": False, "error": err, "samples": []})
+            # 试算预览：两组示例 token 输入下的 USD 成本与命中阶梯名
+            samples: list[dict[str, Any]] = []
+            for p, c in ((100_000, 5_000), (250_000, 10_000)):
+                try:
+                    raw, tier = eval_tiered_expr(expr, {"p": p, "c": c})
+                    samples.append({"p": p, "c": c, "usd": raw / 1_000_000, "tier": tier or ""})
+                except Exception:
+                    continue
+            return self._ok({"valid": True, "error": "", "samples": samples})
         except Exception as e:
             return self._err(str(e))
 
@@ -1919,6 +1947,13 @@ class WebApiMixin:
                     if n is not None:
                         normalized_p[pid_s] = n
                 out[k] = normalized_p
+            elif k == "price_sources":
+                # 不能用 coerce_to_default_type（非空默认 dict 会丢弃 newapi:<pid> 动态键）
+                from .config import normalize_price_sources
+
+                if not isinstance(v, dict):
+                    return None, "price_sources 必须是对象"
+                out[k] = normalize_price_sources(v)
             elif k == "exchange_rates":
                 # 接受任意 {货币代码: 汇率} dict，逐值转 float（可能含 API 同步的
                 # 160+ 货币，不能用非空默认 dict 的 coerce 逻辑裁剪）
@@ -1971,7 +2006,7 @@ class WebApiMixin:
         校验 → 写插件自有 ``config.json``（持久，不被 AstrBot 裁剪）→ 重建
         ``self.cfg``（立即对后续读取生效）→ 开关同步 ``self.config`` + ``save_config``
         （持久到 ``<plugin>_config.json``，self.config 仅含开关故无裁剪噪音）→
-        schedule/alerts 变更则重注册 CronJob。
+        price_sync/schedule/alerts 变更则重注册 CronJob。
         """
         try:
             from astrbot import logger
@@ -1999,8 +2034,8 @@ class WebApiMixin:
                 self.config.save_config(switches_from_config(merged))
             except Exception as e:
                 logger.warning("[cost_control] 开关持久化失败（不影响热生效）: %s", e)
-            # 4. schedule/alerts 变更 → 重注册 cron（幂等）
-            if any(k in changed for k in ("schedule", "alerts")):
+            # price_sync/schedule/alerts 变更 → 重注册 cron（幂等）
+            if any(k in changed for k in ("price_sync", "schedule", "alerts")):
                 try:
                     await self.register_cron()
                 except Exception as e:
