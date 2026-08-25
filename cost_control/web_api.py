@@ -1782,10 +1782,10 @@ class WebApiMixin:
             if not expr:
                 return self._err("缺少 expr")
             try:
-                from .expr_eval import validate_expr
+                from .expr_eval import validate_tiered_expr
             except Exception:
                 return self._err("表达式引擎未就绪（P2 待实现）")
-            err = validate_expr(expr)
+            err = validate_tiered_expr(expr)
             return self._ok({"valid": not err, "error": err or ""})
         except Exception as e:
             return self._err(str(e))
