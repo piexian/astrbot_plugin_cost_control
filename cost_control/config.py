@@ -98,6 +98,18 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "enable_daily_report": False,
         "retain_days": 90,
     },
+    # 多源价格目录（multi-source-pricing）。
+    # 公共源默认启用；New API 源按 "newapi:<provider_id>": {"enabled": bool} 动态加入。
+    "price_sources": {
+        "modelsdev": {"enabled": True},
+        "litellm": {"enabled": True},
+        "openrouter": {"enabled": True},
+    },
+    # 用户对 (provider_id, model) 选定的价格源：
+    # {"<provider_id>": {"<model>": {"price_key": "<source>:<source_model_id>", "confirmed": bool}}}
+    "price_selections": {},
+    # 价格同步设置：默认仅手动触发；auto_enabled=True 时按 cron 自动刷新。
+    "price_sync": {"auto_enabled": False, "cron": "0 4 * * *"},
 }
 
 
@@ -290,6 +302,61 @@ def get_rate_updated_at(config: dict[str, Any] | None) -> str:
 
     return _get_at(config)
 
+def get_price_sources(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """返回价格源配置（``price_sources``）。
+
+    形态：``{"<source_id>": {"enabled": bool, ...}}``；非法值回退空 dict。
+    """
+    raw = get_config(config, "price_sources", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for sid, cfg in raw.items():
+        key = str(sid or "").strip()
+        if not key or not isinstance(cfg, dict):
+            continue
+        out[key] = dict(cfg)
+    return out
+
+
+def get_enabled_price_sources(config: dict[str, Any] | None) -> list[str]:
+    """返回所有 enabled=True 的价格源 ID（保持配置顺序）。"""
+    return [sid for sid, cfg in get_price_sources(config).items() if cfg.get("enabled")]
+
+
+def get_price_selections(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """返回用户价格选择（``price_selections``）。
+
+    形态：``{"<provider_id>": {"<model>": {"price_key", "confirmed"}}}``；
+    非法结构回退空 dict。
+    """
+    raw = get_config(config, "price_selections", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for pid, models in raw.items():
+        key = str(pid or "").strip()
+        if not key or not isinstance(models, dict):
+            continue
+        clean: dict[str, Any] = {}
+        for model, sel in models.items():
+            mkey = str(model or "").strip()
+            if mkey and isinstance(sel, dict):
+                clean[mkey] = dict(sel)
+        if clean:
+            out[key] = clean
+    return out
+
+
+def get_price_sync_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    """返回价格同步设置（``price_sync``）。"""
+    raw = get_config(config, "price_sync", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "auto_enabled": bool(raw.get("auto_enabled", False)),
+        "cron": str(raw.get("cron") or "0 4 * * *").strip(),
+    }
 
 def _normalize_user_entry(entry: Any) -> dict[str, Any] | None:
     """规范化一条用户定价 entry（key=provider_id 的 value）。非法返回 ``None``。
