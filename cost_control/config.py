@@ -302,6 +302,7 @@ def get_rate_updated_at(config: dict[str, Any] | None) -> str:
 
     return _get_at(config)
 
+
 def get_price_sources(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """返回价格源配置（``price_sources``）。
 
@@ -358,33 +359,126 @@ def get_price_sync_config(config: dict[str, Any] | None) -> dict[str, Any]:
         "cron": str(raw.get("cron") or "0 4 * * *").strip(),
     }
 
+
+_PER_TOKEN_FIELDS: tuple[str, ...] = ("input", "input_cached", "output", "cache_creation")
+
+
 def _normalize_user_entry(entry: Any) -> dict[str, Any] | None:
     """规范化一条用户定价 entry（key=provider_id 的 value）。非法返回 ``None``。
 
-    识别 ``mode``（缺省 per_token），按 mode 校验数值：
-    - per_token：input/input_cached/output（float>=0，缺 0.0）、cache_creation（float>=0 或 None）。
+    识别 ``mode``（缺省 per_token），按 mode 校验：
+    - per_token：四字段 float>=0 或 None（缺省 None 表示未配置，供 resolve 继承），
+      另输出 ``configured`` 标记各字段是否显式提供（区分「未填」与「显式 0」）。
     - per_turn/per_request：price（float>=0）。
-    非法字段回退 0.0 / None；mode 非法或 entry 非 dict 返回 None。
+    - per_tier：base + context_tiers/service_tiers 结构。
+    - tiered_expr：expr 经 :func:`expr_eval.validate_tiered_expr` 校验，非法丢弃。
+    mode 非法或 entry 非 dict 返回 None。
     """
     if not isinstance(entry, dict):
         return None
     mode = str(entry.get("mode") or "per_token").strip().lower()
-    if mode not in ("per_token", "per_turn", "per_request"):
-        return None
+    currency = str(entry.get("currency", "USD") or "USD").strip().upper() or "USD"
     if mode == "per_token":
-        out: dict[str, Any] = {"mode": "per_token"}
-        for f in ("input", "input_cached", "output"):
+        return _normalize_per_token(entry, currency)
+    if mode in ("per_turn", "per_request"):
+        return {"mode": mode, "price": _to_float_or_zero(entry.get("price")), "currency": currency}
+    if mode == "per_tier":
+        return _normalize_per_tier(entry, currency)
+    if mode == "tiered_expr":
+        return _normalize_tiered_expr(entry, currency)
+    return None
+
+
+def _is_set(v: Any) -> bool:
+    """字段是否显式提供（键存在、非 None、非空白字符串）。"""
+    if v is None:
+        return False
+    if isinstance(v, str) and not v.strip():
+        return False
+    return True
+
+
+def _normalize_per_token(entry: dict[str, Any], currency: str) -> dict[str, Any]:
+    out: dict[str, Any] = {"mode": "per_token", "currency": currency, "configured": {}}
+    for f in _PER_TOKEN_FIELDS:
+        if _is_set(entry.get(f)):
             out[f] = _to_float_or_zero(entry.get(f))
-        cc = entry.get("cache_creation")
-        if cc is None:
-            out["cache_creation"] = None
+            out["configured"][f] = True
         else:
-            out["cache_creation"] = _to_float_or_zero(cc)
-        out["currency"] = str(entry.get("currency", "USD") or "USD").strip().upper() or "USD"
-        return out
-    # per_turn / per_request
-    cur = str(entry.get("currency", "USD") or "USD").strip().upper() or "USD"
-    return {"mode": mode, "price": _to_float_or_zero(entry.get("price")), "currency": cur}
+            out[f] = None
+            out["configured"][f] = False
+    return out
+
+
+def _normalize_price_fields(raw: Any) -> tuple[dict[str, Any], dict[str, bool]]:
+    """规范化一组 per_token 字段，返回 (值 dict, configured dict)。"""
+    values: dict[str, Any] = {}
+    configured: dict[str, bool] = {}
+    src = raw if isinstance(raw, dict) else {}
+    for f in _PER_TOKEN_FIELDS:
+        if _is_set(src.get(f)):
+            values[f] = _to_float_or_zero(src.get(f))
+            configured[f] = True
+        else:
+            values[f] = None
+            configured[f] = False
+    return values, configured
+
+
+def _normalize_per_tier(entry: dict[str, Any], currency: str) -> dict[str, Any] | None:
+    base, base_cfg = _normalize_price_fields(entry.get("base"))
+    if not any(base_cfg.values()):
+        return None  # base 全空，无有效阶梯价
+    context_tiers: list[dict[str, Any]] = []
+    for t in entry.get("context_tiers") or []:
+        if not isinstance(t, dict):
+            continue
+        try:
+            threshold = int(t.get("threshold_tokens"))
+        except (TypeError, ValueError):
+            continue
+        if threshold < 0:
+            continue
+        vals, cfg = _normalize_price_fields(t)
+        if not any(cfg.values()):
+            continue
+        context_tiers.append({"threshold_tokens": threshold, **vals})
+    context_tiers.sort(key=lambda x: x["threshold_tokens"])
+    service_tiers: list[dict[str, Any]] = []
+    for s in entry.get("service_tiers") or []:
+        if not isinstance(s, dict):
+            continue
+        match = str(s.get("match") or "").strip()
+        if not match:
+            continue
+        mult: dict[str, float] = {}
+        for f in _PER_TOKEN_FIELDS:
+            mk = f + "_multiplier"
+            if _is_set(s.get(mk)):
+                mv = _to_float_or_zero(s.get(mk))
+                if mv > 0:
+                    mult[mk] = mv
+        if mult:
+            service_tiers.append({"match": match, **mult})
+    return {
+        "mode": "per_tier",
+        "base": base,
+        "configured": base_cfg,
+        "context_tiers": context_tiers,
+        "service_tiers": service_tiers,
+        "currency": currency,
+    }
+
+
+def _normalize_tiered_expr(entry: dict[str, Any], currency: str) -> dict[str, Any] | None:
+    expr = str(entry.get("expr") or "").strip()
+    if not expr:
+        return None
+    from .expr_eval import validate_tiered_expr
+
+    if validate_tiered_expr(expr) is not None:
+        return None  # 非法表达式丢弃
+    return {"mode": "tiered_expr", "expr": expr, "currency": currency}
 
 
 def _to_float_or_zero(v: Any) -> float:
@@ -399,9 +493,7 @@ def _to_float_or_zero(v: Any) -> float:
 # schema 仅保留总开关 enabled，其余所有参数走插件自有 config.json；
 # 故此处只同步 enabled（由 AstrBot 持久化到 <plugin>_config.json，
 # 供 WebUI 插件配置页显示）。
-SWITCH_KEYS: tuple[tuple[str | int, ...], ...] = (
-    ("enabled",),
-)
+SWITCH_KEYS: tuple[tuple[str | int, ...], ...] = (("enabled",),)
 
 
 def deep_merge(base: Any, *overrides: Any) -> Any:

@@ -4,16 +4,18 @@
 ``{"defaults", "user"}``）把 token 用量 / 调用次数 / 请求数换算为 USD 成本。
 
 支持三种计费模式（``mode``）：
-
 - ``per_token``：按 input / input_cached / output（+cache_creation）token 计费，
   USD / 百万 token。内置 ``DEFAULT_PRICING`` 即此模式（按模型名匹配）。
 - ``per_turn``：每次 LLM 调用（每条 ProviderStat / CostSupplement 记录）固定 USD/次，
   仅计 LLM 调用次数（不含非 LLM tool 执行）。
 - ``per_request``：每次用户请求固定 USD/次；一次请求可能含多次 function-calling LLM
   调用，按 distinct ``request_id`` 计数。
+- ``per_tier``：基础价 + context tier（按上下文长度阶梯覆盖）+ service tier（倍率）。
+- ``tiered_expr``：New API 兼容表达式动态计费（:mod:`cost_control.expr_eval`）。
 
-匹配优先级（:func:`resolve_pricing`）：用户定价按 ``provider_id`` 命中 → 内置默认按
-模型名匹配（per_token）→ 未定价（成本 0）。
+匹配优先级（:func:`resolve_pricing`）：模型级手工价 ``provider_id|model`` → 用户确认/
+自动匹配的候选价格（price_catalog）→ 旧 provider 级手工价（模糊）→ 内置默认按模型名
+匹配（per_token）→ 未定价（成本 0）。
 
 核心计算逻辑抽成模块级纯函数（``resolve_pricing`` / ``compute_cost_value``），便于
 单元测试；``CostMixin`` 仅做配置读取与委托。
@@ -116,43 +118,145 @@ def match_pricing(
     return pricing[key] if key is not None else None
 
 
+_PER_TOKEN_FIELDS: tuple[str, ...] = ("input", "input_cached", "output", "cache_creation")
+
+
 def resolve_pricing(
     provider_id: str | None,
     model: str | None,
     pricing: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """解析生效的计费规则（优先级：provider_id 用户定价 > 模型名默认 > 未定价）。
+    """解析生效的计费规则（五级优先级，见模块 docstring）。
 
-    **provider_id 模糊匹配**：用户定价 dict 的 key 不必与 provider_id 精确相等，
-    走 :func:`_best_match_key` 三级算法（精确 > 前缀 > 子串，最长优先）——
-    故用户把 ``deepseek`` 配为 key 即可命中实际 provider_id
-    ``deepseek-official-01``（子串）；最长优先保证 ``gpt-4`` 优先于 ``gpt``
-    命中 ``gpt-4o-mini``。仅做「key 是 provider_id 的子串 / 前缀」方向匹配。
+    1. 模型级手工价 ``user["provider_id|model"]``（精确，不参与模糊匹配）。
+    2. 用户确认 / 自动匹配的候选价格（``selections`` → ``catalog``）。
+    3. 旧 provider 级手工价 ``user[provider_id]`` 模糊匹配（精确 > 前缀 > 子串，最长优先）。
+    4. 内置默认表按模型名匹配（per_token）。
+    5. 未定价 → None（成本 0）。
 
-    Args:
-        provider_id: Provider ID（用户定价模糊匹配）。
-        model: 模型名（默认表匹配）。
-        pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。
+    ``pricing`` 通过注入 ``catalog`` / ``selections`` 键携带价格目录与选择（缺省为空）。
+    用户 per_token 未配置字段经 :func:`_inherit_per_token` 从候选/默认价继承（AC7）。
 
     Returns:
-        规范化规则 dict，或 ``None``（未定价，成本 0）：
-
-        - ``{"mode":"per_token","input","input_cached","output","cache_creation"?}``
-        - ``{"mode":"per_turn","price"}``
-        - ``{"mode":"per_request","price"}``
+        规范化规则 dict（``per_token``/``per_turn``/``per_request``/``per_tier``/
+        ``tiered_expr``），或 ``None``。
     """
     user = pricing.get("user") if isinstance(pricing, dict) else None
     if isinstance(user, dict) and provider_id:
-        key = _best_match_key(provider_id, user)
+        # 1. 模型级手工价（精确 key）
+        if model:
+            exact = user.get(f"{provider_id}|{model}")
+            if isinstance(exact, dict) and exact.get("mode"):
+                return _inherit_per_token(exact, provider_id, model, pricing)
+        # 2. 候选价格（用户确认 / 自动匹配）
+        sel = _resolve_selection(provider_id, model, pricing)
+        if sel is not None:
+            return sel
+        # 3. 旧 provider 级手工价（模糊，排除模型级 key）
+        legacy = {k: v for k, v in user.items() if "|" not in k}
+        key = _best_match_key(provider_id, legacy)
         if key is not None:
-            rule = user[key]
+            rule = legacy[key]
             if isinstance(rule, dict) and rule.get("mode"):
-                return rule
+                return _inherit_per_token(rule, provider_id, model, pricing)
+    # 4. 内置默认表
     defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
     if isinstance(defaults, dict):
         prices = match_pricing(model, defaults)
         if prices:
             return {"mode": "per_token", **prices}
+    return None
+
+
+def _resolve_selection(
+    provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any] | None:
+    """从候选选择取 ``price_key`` → ``catalog`` 规则（无则 None）。"""
+    if not provider_id or not model or not isinstance(pricing, dict):
+        return None
+    selections = pricing.get("selections")
+    catalog = pricing.get("catalog")
+    if not isinstance(selections, dict) or not isinstance(catalog, dict):
+        return None
+    per_model = selections.get(provider_id)
+    if not isinstance(per_model, dict):
+        return None
+    sel = per_model.get(model)
+    if not isinstance(sel, dict):
+        return None
+    price_key = sel.get("price_key")
+    price = catalog.get(price_key) if price_key else None
+    if not isinstance(price, dict):
+        return None
+    return _catalog_price_to_rule(price)
+
+
+def _catalog_price_to_rule(price: dict[str, Any]) -> dict[str, Any] | None:
+    """把 catalog 价格条目转为 resolve 规则（字段缺省为 None，由计算层回退）。"""
+    mode = str(price.get("mode") or "per_token")
+    cur = str(price.get("currency") or "USD").strip().upper() or "USD"
+    if mode == "per_token":
+        return {
+            "mode": "per_token",
+            "currency": cur,
+            "input": price.get("input"),
+            "input_cached": price.get("input_cached"),
+            "output": price.get("output"),
+            "cache_creation": price.get("cache_creation"),
+        }
+    if mode == "per_tier":
+        return {
+            "mode": "per_tier",
+            "currency": cur,
+            "base": price.get("base") or {},
+            "context_tiers": price.get("context_tiers") or [],
+            "service_tiers": price.get("service_tiers") or [],
+        }
+    if mode == "tiered_expr":
+        return {"mode": "tiered_expr", "expr": price.get("expr"), "currency": cur}
+    if mode in ("per_turn", "per_request"):
+        return {"mode": mode, "price": price.get("price", 0.0), "currency": cur}
+    return None
+
+
+def _inherit_per_token(
+    rule: dict[str, Any], provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any]:
+    """用户 per_token 未配置字段从候选/默认价继承；无回落时缺省字段按 0（旧行为）。
+
+    仅作用于带 ``configured`` 标志的用户 per_token 规则；defaults/catalog 规则字段完整
+    （无 ``configured``），直接返回。
+    """
+    if rule.get("mode") != "per_token":
+        return rule
+    configured = rule.get("configured")
+    if not isinstance(configured, dict):
+        return rule
+    fallback = _fallback_per_token(provider_id, model, pricing)
+    out = dict(rule)
+    for f in _PER_TOKEN_FIELDS:
+        if configured.get(f) and out.get(f) is not None:
+            continue  # 用户显式提供
+        fb = fallback.get(f) if isinstance(fallback, dict) else None
+        if fb is not None:
+            out[f] = fb
+        elif f != "cache_creation":
+            out[f] = 0.0  # cache_creation 留 None，由 _cost_per_token 回退 input
+    return out
+
+
+def _fallback_per_token(
+    provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any] | None:
+    """per_token 继承的回落价：候选（catalog per_token）优先，其次内置默认表。"""
+    sel = _resolve_selection(provider_id, model, pricing)
+    if sel is not None and sel.get("mode") == "per_token":
+        return sel
+    defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
+    if isinstance(defaults, dict):
+        d = match_pricing(model, defaults)
+        if d:
+            return {"mode": "per_token", **d}
     return None
 
 
@@ -170,6 +274,92 @@ def _cost_per_token(usage: dict[str, Any], rule: dict[str, Any]) -> float:
         + int(usage.get("cache_creation") or 0) * creation_price
     ) / 1_000_000.0
     return float(cost)
+
+
+def _tier_field_prices(usage: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
+    """per_tier 当前生效字段价：base ⊕ context tier（阈值升序取最后 ``len > threshold``）。"""
+    base = rule.get("base") if isinstance(rule.get("base"), dict) else {}
+    prices: dict[str, Any] = dict(base)
+    total_in = (
+        int(usage.get("token_input_other", 0) or 0)
+        + int(usage.get("token_input_cached", 0) or 0)
+        + int(usage.get("cache_creation") or 0)
+    )
+    tiers = (x for x in (rule.get("context_tiers") or []) if isinstance(x, dict))
+    for t in sorted(tiers, key=lambda x: int(x.get("threshold_tokens", 0) or 0)):
+        try:
+            thr = int(t.get("threshold_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if total_in > thr:
+            for f in _PER_TOKEN_FIELDS:
+                if t.get(f) is not None:
+                    prices[f] = t[f]
+    return prices
+
+
+def _cost_per_tier(usage: dict[str, Any], rule: dict[str, Any]) -> float:
+    """per_tier 模式成本（USD）：context tier 覆盖 + service tier 倍率，再四类 token 计价。"""
+    prices = _tier_field_prices(usage, rule)
+    # service tier 倍率（来自 billing_context.service_tier 或 usage.service_tier）
+    ctx = usage.get("billing_context")
+    svc = (ctx.get("service_tier") if isinstance(ctx, dict) else None) or usage.get("service_tier")
+    if svc:
+        for s in rule.get("service_tiers") or []:
+            if not isinstance(s, dict):
+                continue
+            if str(s.get("match", "")).lower() != str(svc).lower():
+                continue
+            for f in _PER_TOKEN_FIELDS:
+                m = s.get(f + "_multiplier")
+                if m is not None and prices.get(f) is not None:
+                    prices[f] = float(prices[f]) * float(m)
+    input_price = float(prices.get("input") or 0.0)
+    cached_price = float(prices.get("input_cached") or 0.0)
+    output_price = float(prices.get("output") or 0.0)
+    creation_price = float(prices.get("cache_creation") or input_price)
+    cost = (
+        int(usage.get("token_input_other", 0) or 0) * input_price
+        + int(usage.get("token_input_cached", 0) or 0) * cached_price
+        + int(usage.get("token_output", 0) or 0) * output_price
+        + int(usage.get("cache_creation") or 0) * creation_price
+    ) / 1_000_000.0
+    return float(cost)
+
+
+def _cost_tiered_expr(usage: dict[str, Any], rule: dict[str, Any]) -> float:
+    """tiered_expr 模式成本（USD）：表达式原始输出 ``/1_000_000``，回填 ``_matched_tier``。"""
+    from .expr_eval import eval_tiered_expr
+
+    expr = str(rule.get("expr") or "")
+    if not expr:
+        return 0.0
+    other = int(usage.get("token_input_other", 0) or 0)
+    cached = int(usage.get("token_input_cached", 0) or 0)
+    output = int(usage.get("token_output", 0) or 0)
+    cc = int(usage.get("cache_creation") or 0)
+    variables = {
+        "p": float(other),
+        "c": float(output),
+        "len": float(other + cached + cc),
+        "cr": float(cached),
+        "cc": float(cc),
+        "cc1h": float(usage.get("cache_creation_1h") or 0),
+        "img": 0.0,
+        "img_o": 0.0,
+        "ai": 0.0,
+        "ao": 0.0,
+    }
+    ctx = usage.get("billing_context")
+    context: dict[str, Any] = dict(ctx) if isinstance(ctx, dict) else {}
+    if "created_at" not in context and usage.get("created_at") is not None:
+        context["created_at"] = usage.get("created_at")
+    try:
+        raw, matched = eval_tiered_expr(expr, variables, context)
+    except Exception:
+        return 0.0
+    usage["_matched_tier"] = matched  # 供持久化回填
+    return float(raw) / 1_000_000.0
 
 
 def compute_cost_value(
@@ -211,6 +401,10 @@ def compute_cost_value(
         return _cost_per_token(usage, rule)
     if mode == "per_turn":
         return float(rule.get("price", 0.0) or 0.0)
+    if mode == "per_tier":
+        return _cost_per_tier(usage, rule)
+    if mode == "tiered_expr":
+        return _cost_tiered_expr(usage, rule)
     # per_request：单条无法独立计费，聚合在调用方处理
     return 0.0
 
@@ -245,6 +439,10 @@ def compute_cost_with_currency(
         return _cost_per_token(usage, rule), cur
     if mode == "per_turn":
         return float(rule.get("price", 0.0) or 0.0), cur
+    if mode == "per_tier":
+        return _cost_per_tier(usage, rule), cur
+    if mode == "tiered_expr":
+        return _cost_tiered_expr(usage, rule), cur
     # per_request：单条无法独立计费
     return 0.0, cur
 
@@ -300,6 +498,11 @@ def compute_row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
         mode = rule.get("mode", "per_token")
         if mode == "per_token":
             return _cost_per_token(row, rule)
+        if mode == "per_tier":
+            # 聚合近似：tier 按聚合 len 选择，无 per-record service_tier
+            return _cost_per_tier(row, rule)
+        if mode == "tiered_expr":
+            return _cost_tiered_expr(row, rule)  # 聚合近似
         return int(row.get("count", 0) or 0) * float(rule.get("price", 0.0) or 0.0)
     except Exception:
         return 0.0
@@ -328,6 +531,10 @@ def compute_row_cost_in_main(
         mode = rule.get("mode", "per_token")
         if mode == "per_token":
             raw = _cost_per_token(row, rule)
+        elif mode == "per_tier":
+            raw = _cost_per_tier(row, rule)  # 聚合近似
+        elif mode == "tiered_expr":
+            raw = _cost_tiered_expr(row, rule)  # 聚合近似
         else:
             raw = int(row.get("count", 0) or 0) * float(rule.get("price", 0.0) or 0.0)
         return round(convert(raw, cur, main_currency, rates), 6)
@@ -370,8 +577,23 @@ class CostMixin:
     """按生效定价计算 USD 成本的 Mixin。"""
 
     def get_pricing(self) -> dict[str, Any]:
-        """返回当前生效的定价结构（``{"defaults", "user"}``，见 :func:`get_pricing`）。"""
-        return get_pricing(getattr(self, "cfg", None))
+        """返回当前生效的定价结构，并注入价格目录与候选选择（``catalog``/``selections``）。
+
+        ``catalog``/``selections`` 供 :func:`resolve_pricing` 做候选价格解析；目录不可用或
+        损坏时降级为空（仅靠 defaults/user），保证成本计算永不被打断。
+        """
+        pricing = get_pricing(getattr(self, "cfg", None))
+        data_dir = getattr(self, "data_dir", None)
+        if data_dir:
+            try:
+                from .price_catalog import PriceCatalog
+
+                catalog = PriceCatalog(str(data_dir))
+                pricing["catalog"] = dict(catalog.prices)
+                pricing["selections"] = {p: dict(m) for p, m in catalog.selections.items()}
+            except Exception:
+                pass
+        return pricing
 
     def get_main_currency(self) -> str:
         """返回当前主货币代码（默认 ``"$"``）。"""
