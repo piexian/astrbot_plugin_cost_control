@@ -101,6 +101,8 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     data?.candidates || {};
   const autoSelected: Record<string, Record<string, string>> =
     data?.auto_selected || {};
+  const ensureDraft = (pid: string): DraftEntry =>
+    drafts[pid] ?? entryToDraft(undefined);
 
   // 当前配置中的 provider ID 集合
   const configIds = useMemo(
@@ -285,8 +287,6 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       delete next[pid];
       return next;
     });
-  const ensureDraft = (pid: string): DraftEntry =>
-    drafts[pid] ?? entryToDraft(undefined);
 
   const collect = (): Record<string, UserPricingEntry> => {
     const out: Record<string, UserPricingEntry> = {};
