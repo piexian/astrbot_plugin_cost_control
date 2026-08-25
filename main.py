@@ -127,8 +127,9 @@ class Main(
         # 独立 try，绝不影响后续预算/归因逻辑。
         try:
             self.ensure_request_id(event)
+            self.capture_req_billing(event, req)
         except Exception as e:
-            logger.warning("[cost_control] request_id 生成失败: %s", e)
+            logger.warning("[cost_control] request_id/计费上下文生成失败: %s", e)
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             model = getattr(req, "model", None) or None
