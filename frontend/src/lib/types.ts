@@ -481,6 +481,8 @@ export interface DetectResult {
   models: number;
   needs_key: boolean;
   error?: string;
+  /** 同 base_url 已有的源 id（URL 去重判据），前端直接复用 */
+  existing_source?: string | null;
 }
 
 // POST /pricing/expr/validate 结果

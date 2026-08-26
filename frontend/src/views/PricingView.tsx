@@ -448,15 +448,22 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       }
       const cfg = await api.getConfig();
       const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
-      ps[`newapi:${pid}`] = {
+      // URL 去重：同 base_url 只建一个源；首次以 provider 短名作默认名，可后续重命名
+      const sid = det.existing_source || `newapi:${shortName(pid)}`;
+      ps[sid] = {
+        ...(ps[sid] as Record<string, unknown> | undefined),
         enabled: true,
-        provider_id: pid,
+        provider_id: (ps[sid] as { provider_id?: string } | undefined)?.provider_id ?? pid,
         base_url: det.base_url ?? "",
         use_provider_key: true,
       };
       await api.postSaveConfig({ price_sources: ps });
-      setSyncMsg(`✅ ${pid} 已启用为 New API 源，正在拉取价格…`);
-      await doSync([`newapi:${pid}`]);
+      setSyncMsg(
+        det.existing_source
+          ? `✅ ${pid} 复用已有源 ${sid}，正在拉取价格…`
+          : `✅ ${sid} 已启用为 New API 源，正在拉取价格…`,
+      );
+      await doSync([sid]);
     } catch (e) {
       setSyncMsg(`❌ 探测失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -464,8 +471,10 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     }
   };
   const disableNewApiSource = async (pid: string) => {
-    await toggleSource(`newapi:${pid}`, false);
-    setSyncMsg(`已停用 New API 源 ${pid}（已确认的选择不受影响）`);
+    const src = newApiSourceFor(pid);
+    if (!src) return;
+    await toggleSource(src.sourceId, false);
+    setSyncMsg(`已停用源 ${src.sourceId}（已确认的选择不受影响）`);
   };
 
   // 乐观更新：选取后用返回值即时更新本地 override，不调 res.refetch()
@@ -530,11 +539,18 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     }
   };
 
-  // provider 对应的 New API 源状态（有配置才显示开关行）
+  // provider 对应的 New API 源状态（URL 去重后源 id 不再等于 newapi:<pid>，
+  // 按 记录的 provider_id 或默认短名 双路匹配）
   const newApiSourceFor = (pid: string) => {
-    const sid = `newapi:${pid}`;
-    const st = sources[sid];
-    if (st) return { sourceId: sid, enabled: !!st.enabled };
+    for (const sid of [`newapi:${shortName(pid)}`, `newapi:${pid}`]) {
+      const st = sources[sid];
+      if (st) return { sourceId: sid, enabled: !!st.enabled };
+    }
+    for (const [sid, st] of Object.entries(sources)) {
+      if (sid.startsWith("newapi:") && st.provider_id === pid) {
+        return { sourceId: sid, enabled: !!st.enabled };
+      }
+    }
     return undefined;
   };
 

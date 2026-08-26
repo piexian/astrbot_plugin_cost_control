@@ -88,6 +88,24 @@ def _attach_selection_price(sel: dict[str, Any], catalog: Any) -> None:
         sel["price"] = _catalog_field_values(entry.to_dict())
 
 
+def _find_newapi_source_by_url(cfg: dict[str, Any], root: str) -> str | None:
+    """按归一化 base_url 在 price_sources 中查找已有的 New API 源（URL 去重判据）。"""
+    norm = lambda u: str(u or "").strip().rstrip("/").lower()  # noqa: E731
+
+    target = norm(root)
+    if not target:
+        return None
+    raw = cfg.get("price_sources") if isinstance(cfg, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    for sid, sc in raw.items():
+        if not isinstance(sid, str) or not sid.startswith("newapi:"):
+            continue
+        if isinstance(sc, dict) and norm(sc.get("base_url")) == target:
+            return sid
+    return None
+
+
 def _deleted_provider_residues(
     provider_models: list[dict[str, Any]],
     usage_by_provider: dict[str, dict[str, int]],
@@ -1809,7 +1827,14 @@ class WebApiMixin:
                 return self._err("缺少 provider_id")
             provider = self._provider_cfg_fn()(pid)
             root = derive_newapi_root(str((provider or {}).get("api_base") or ""))
-            base = {"provider_id": pid, "base_url": root}
+            base = {
+                "provider_id": pid,
+                "base_url": root,
+                # 同 URL 已有源时前端复用，避免一个实例建 N 个重复源
+                "existing_source": _find_newapi_source_by_url(
+                    deep_merge(CONFIG_DEFAULTS, getattr(self, "cfg", {}) or {}), root
+                ),
+            }
             if not is_http_url(root):
                 return self._ok(
                     {
