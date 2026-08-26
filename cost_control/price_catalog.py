@@ -139,7 +139,10 @@ class PriceCatalog:
     updated_at: str = ""
     sources: dict[str, SourceStatus] = field(default_factory=dict)
     prices: dict[str, CatalogPrice] = field(default_factory=dict)
-
+    # 候选匹配缓存：key=(model, frozenset(sources))；prices 变更时必须清空
+    _candidate_cache: dict[tuple[str, frozenset[str]], list[Candidate]] = field(
+        default_factory=dict
+    )
     # ---- 持久化 ----
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -197,6 +200,7 @@ class PriceCatalog:
         for key, price in prices.items():
             self.prices[key] = price
         self.updated_at = _now_iso()
+        self._candidate_cache.clear()
 
     def prices_for_source(self, source: str) -> dict[str, CatalogPrice]:
         return {key: p for key, p in self.prices.items() if _is_same_source(key, source)}
@@ -222,6 +226,11 @@ class PriceCatalog:
         target_norm = _normalize_model_name(target_raw)
         if not target_norm:
             return []
+
+        cache_key = (target_raw, frozenset(sources) if sources else frozenset())
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         per_source: dict[str, list[Candidate]] = {}
         for price in self.prices.values():
@@ -251,6 +260,7 @@ class PriceCatalog:
             cands.sort(key=_candidate_sort_key, reverse=True)
             result.extend(cands[:limit_per_source])
         result.sort(key=_candidate_sort_key, reverse=True)
+        self._candidate_cache[cache_key] = result
         return result
 
 

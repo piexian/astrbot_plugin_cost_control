@@ -234,6 +234,7 @@ def _resolve_selection(
 
     # 自动匹配不落盘，运行时使用目录中的唯一高置信候选。用户确认选择始终优先。
     catalog_obj = pricing.get("catalog_obj")
+    catalog = pricing.get("catalog")
     if catalog_obj is None:
         return None
     try:
@@ -243,7 +244,24 @@ def _resolve_selection(
         source_filter = (
             set(enabled_sources) if isinstance(enabled_sources, (list, set, tuple)) else None
         )
-        auto = select_auto_candidate(catalog_obj.find_candidates(model, sources=source_filter))
+        # 预算表优先：get_pricing 已按 (provider, model) 算好自动匹配，热路径零模糊匹配；
+        # 未命中（未配置 provider / 预算失败）才回退实时匹配，实时路径走候选缓存。
+        auto_selected = pricing.get("auto_selected")
+        if isinstance(auto_selected, dict):
+            pids = (provider_id, None) if provider_id else (None,)
+            for pid in pids:
+                per_model = auto_selected.get(pid)
+                if not isinstance(per_model, dict):
+                    continue
+                price_key = per_model.get(model)
+                if not price_key:
+                    continue
+                entry = pricing.get("catalog", {}).get(price_key)
+                if isinstance(entry, dict):
+                    return _catalog_price_to_rule(entry)
+        auto = select_auto_candidate(
+            catalog_obj.find_candidates(model, sources=source_filter)
+        )
         if auto is not None:
             return _catalog_price_to_rule(auto.price.to_dict())
     except Exception:
@@ -725,10 +743,84 @@ class CostMixin:
                     price_key: price.to_dict() for price_key, price in catalog.prices.items()
                 }
                 pricing["catalog_obj"] = catalog
+                pricing["auto_selected"] = self._compute_auto_selected(
+                    astrbot_config, catalog, pricing
+                )
         except Exception:
             pricing.setdefault("provider_clusters", {})
             pass
         return pricing
+
+    def _compute_auto_selected(
+        self,
+        astrbot_config: dict[str, Any],
+        catalog: Any,
+        pricing: dict[str, Any],
+    ) -> dict[str, dict[str, str]]:
+        """按 (provider_id, model) 预算自动匹配价格键，供热路径查表。
+
+        与 /pricing 端点的实时预算同口径：主模型 + model_list 启用项，跳过已
+        确认选择；候选经缓存后仅未见过的新模型名触发全量遍历。
+        """
+        from .price_catalog import select_auto_candidate
+
+        result: dict[str, dict[str, str]] = {}
+        selections = pricing.get("selections") or {}
+        enabled_sources = pricing.get("enabled_sources")
+        source_filter = (
+            set(enabled_sources)
+            if isinstance(enabled_sources, (list, set, tuple))
+            else None
+        )
+        prov_list = astrbot_config.get("provider") if isinstance(astrbot_config, dict) else None
+        if not isinstance(prov_list, list):
+            return result
+        for p in prov_list:
+            try:
+                if not isinstance(p, dict):
+                    continue
+                pid = str(p.get("id") or "").strip()
+                if not pid:
+                    continue
+                models: list[str] = []
+                main_model = str(p.get("model") or "").strip()
+                if main_model:
+                    models.append(main_model)
+                model_list = p.get("model_list")
+                if isinstance(model_list, list):
+                    for item in model_list:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("enable") is False:
+                            continue
+                        name = str(item.get("model_name") or item.get("model") or "").strip()
+                        legacy_cfg = item.get("model_config")
+                        if not name and isinstance(legacy_cfg, dict):
+                            name = str(legacy_cfg.get("model") or "").strip()
+                        if name and name not in models:
+                            models.append(name)
+                legacy_model_config = p.get("model_config")
+                if isinstance(legacy_model_config, dict):
+                    name = str(legacy_model_config.get("model") or "").strip()
+                    if name and name not in models:
+                        models.append(name)
+                per_provider = selections.get(pid) if isinstance(selections, dict) else None
+                confirmed = {
+                    m
+                    for m, sel in (per_provider.items() if isinstance(per_provider, dict) else [])
+                    if isinstance(sel, dict) and sel.get("confirmed")
+                }
+                for model in models:
+                    if model in confirmed:
+                        continue
+                    auto = select_auto_candidate(
+                        catalog.find_candidates(model, sources=source_filter)
+                    )
+                    if auto is not None:
+                        result.setdefault(pid, {})[model] = auto.price_key
+            except Exception:
+                continue
+        return result
 
     def get_main_currency(self) -> str:
         """返回当前主货币代码（默认 ``"$"``）。"""
