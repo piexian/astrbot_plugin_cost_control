@@ -54,6 +54,18 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null);
   const [highlightSignal, setHighlightSignal] = useState(0);
   const [selectedClusterId, setSelectedClusterId] = useState("");
+  // 卡片展开态记忆（providerId 粒度），过滤/切聚类重挂载不丢
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleExpandedProvider = (pid: string, v: boolean) => {
+    setExpandedProviders((prev) => {
+      const next = new Set(prev);
+      if (v) next.add(pid);
+      else next.delete(pid);
+      return next;
+    });
+  };
   // 局部未定价告警覆盖：保存后单独刷新，避免整页 refetch 导致闪烁
   const [unpricedOverride, setUnpricedOverride] = useState<
     PricingUnpriced[] | null
@@ -583,6 +595,8 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       priceCandidatesByModel={candidateMap[p.id]}
       newApiSource={p.isDeletedResidue ? undefined : newApiSourceFor(p.id)}
       selectingKey={selectingKey ?? undefined}
+      expanded={expandedProviders.has(p.id)}
+      onExpandedChange={(v) => toggleExpandedProvider(p.id, v)}
       onSelectCandidate={(m, pk) => selectCandidate(p.id, m, pk)}
       onResetSelection={(m) => resetSelection(p.id, m)}
       onEnableNewApiSource={

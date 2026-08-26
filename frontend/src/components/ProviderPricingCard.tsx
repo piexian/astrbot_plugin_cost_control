@@ -316,6 +316,8 @@ export function ProviderPricingCard({
   onChange,
   onClear,
   onDeleteData,
+  expanded: expandedProp,
+  onExpandedChange,
 }: {
   providerId: string;
   type?: string;
@@ -346,10 +348,14 @@ export function ProviderPricingCard({
   onClear: () => void;
   /** 已删除供应商残留的删除按钮回调 */
   onDeleteData?: () => void;
+  /** 受控展开态（父级记忆）；缺省时按未定价默认展开 */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
-  // 自定义定价也默认折叠；仅未定价（无内置匹配）时默认展开以提示用户
-  const [expanded, setExpanded] = useState<boolean>(!matchedDefault);
+  // 展开态由父级记忆（providerId 粒度），过滤/切聚类重挂载不丢
+  const expanded = expandedProp ?? !matchedDefault;
+  const setExpanded = (v: boolean) => onExpandedChange?.(v);
   const [newApiBusy, setNewApiBusy] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [deleting, setDeleting] = useState(false);
