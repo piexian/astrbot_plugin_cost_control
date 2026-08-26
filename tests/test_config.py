@@ -7,6 +7,7 @@ from cost_control.config import (
     deep_merge,
     get_enabled_price_sources,
     get_price_sources,
+    get_pricing,
     load_plugin_config,
     normalize_price_sources,
     save_plugin_config,
@@ -127,6 +128,7 @@ def test_plugin_config_overwrite(tmp_path):
     assert load_plugin_config(d) == {"a": 2, "b": 3}
 
 
+
 def test_price_sources_backfill_public_defaults_for_partial_config():
     """动态 New API 源不能覆盖三种公共源的默认配置。"""
     sources = get_price_sources({"price_sources": {"newapi:gateway": {"enabled": True}}})
@@ -152,3 +154,16 @@ def test_normalize_price_sources_rejects_unknown_source_ids():
     assert normalized["newapi:gateway"]["provider_id"] == "gateway"
     assert "custom-url" not in normalized
     assert "newapi:" not in normalized
+
+
+def test_get_pricing_includes_normalized_cluster_multipliers():
+    pricing = get_pricing(
+        {
+            "pricing_multipliers": {
+                "openai-main": "1.25",
+                "default-one": 1,
+                "invalid-zero": 0,
+            }
+        }
+    )
+    assert pricing["multipliers"] == {"openai-main": 1.25}

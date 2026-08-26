@@ -7,8 +7,9 @@
 
 注意：``TokenUsage`` 仅含 ``input_other`` / ``input_cached`` / ``output``，
 ``cache_creation`` 需从 ``raw_completion`` 解析。不同 provider 的 raw 类型不同
-（Anthropic Message / OpenAI ChatCompletion / Google GenerateContentResponse），
-cache 字段命名各异，按 duck-typing 兼容，解析失败降级为 None。
+（Anthropic Message / OpenAI ChatCompletion / OpenAI Response（Responses API）/
+Google GenerateContentResponse），cache 字段命名各异，按 duck-typing 兼容，
+解析失败降级为 None。
 
 阶段 1 实现。
 """
@@ -63,6 +64,13 @@ def _extract_cache(
             if cache_read is None:
                 ptd = getattr(usage, "prompt_tokens_details", None)
                 cached = getattr(ptd, "cached_tokens", None) if ptd is not None else None
+                if cached is not None:
+                    cache_read = int(cached)
+            # OpenAI Responses API 风格：input_tokens_details.cached_tokens
+            # （openai_responses 供应商的 raw_completion 是 Response 对象）
+            if cache_read is None:
+                itd = getattr(usage, "input_tokens_details", None)
+                cached = getattr(itd, "cached_tokens", None) if itd is not None else None
                 if cached is not None:
                     cache_read = int(cached)
             # DeepSeek 等扩展字段（部分 provider 直接挂在 usage 上）

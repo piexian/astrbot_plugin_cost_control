@@ -173,6 +173,28 @@ class UsageQueryMixin:
         except Exception:
             return zero
 
+    async def delete_usage_by_provider(self, provider_id: str) -> int:
+        """按精确 Provider ID 删除 AstrBot 原生用量记录。
+
+        该操作仅供已从 AstrBot 配置中删除的 Provider 残留清理使用。调用方必须先
+        校验 Provider 已不在当前配置中；这里坚持精确匹配，避免名称前缀相近时误删。
+        数据库异常直接向上抛出，由 Web API 返回明确失败，不能把失败伪装成删除 0 条。
+        """
+        pid = str(provider_id or "").strip()
+        if not pid:
+            return 0
+
+        from astrbot.core.db.po import ProviderStat
+        from sqlalchemy import delete
+
+        db = self.context.get_db()
+        async with db.get_db() as session:
+            result = await session.execute(
+                delete(ProviderStat).where(ProviderStat.provider_id == pid)
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
     async def query_records(
         self,
         *,

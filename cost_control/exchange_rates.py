@@ -60,6 +60,7 @@ def currency_to_symbol(code: str | None) -> str:
     c = str(code or "").strip().upper()
     return CURRENCY_SYMBOLS.get(c, c or "$")
 
+
 # 免费汇率 API（无需 key，返回各货币对 USD 汇率）。
 _RATES_API = "https://open.er-api.com/v6/latest/USD"
 

@@ -72,9 +72,7 @@ def _format_tools(func_tool: Any) -> str:
             params = params if isinstance(params, dict) else {}
             lines.append(f"[{name}] {desc}")
             props = params.get("properties", {}) if isinstance(params, dict) else {}
-            required = set(
-                params.get("required", []) if isinstance(params, dict) else []
-            )
+            required = set(params.get("required", []) if isinstance(params, dict) else [])
             for pname, pinfo in props.items():
                 if isinstance(pinfo, dict):
                     ptype = pinfo.get("type", "")
@@ -84,9 +82,7 @@ def _format_tools(func_tool: Any) -> str:
     except Exception:
         return str(func_tool)
     # 截断超长行
-    return "\n".join(
-        line[:200] + "…" if len(line) > 200 else line for line in lines
-    )
+    return "\n".join(line[:200] + "…" if len(line) > 200 else line for line in lines)
 
 
 def _summarize(sig: dict[str, Any]) -> dict[str, Any]:

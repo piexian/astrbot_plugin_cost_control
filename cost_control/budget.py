@@ -32,12 +32,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .attributor import _str_tokens
-from .config import (
-    enabled_overrides,
-    get_config,
-    get_pricing,
-)
-from .cost import compute_cost_grouped, compute_row_cost
+from .config import enabled_overrides, get_config
+from .cost import compute_row_cost
 
 
 def resolve_tz(context: Any) -> ZoneInfo:
@@ -446,7 +442,7 @@ class BudgetMixin:
 
             # ===== 1. 局部阈值（override）=====
             if overrides:
-                pricing = self.get_pricing() if has_global_cost else get_pricing(cfg)
+                pricing = self.get_pricing()
                 for idx, ov in enumerate(overrides):
                     matched = match_override(ov, umo, user_id, provider_id)
                     if matched is None:
@@ -494,7 +490,9 @@ class BudgetMixin:
                         ov_cur = str(ov.get("cost_currency") or "") or main_cur
                         from .exchange_rates import convert as _convert
 
-                        lc_main = _convert(lc, ov_cur, main_cur, rates) if ov_cur != main_cur else lc
+                        lc_main = (
+                            _convert(lc, ov_cur, main_cur, rates) if ov_cur != main_cur else lc
+                        )
                         if used_c >= lc_main:
                             return {
                                 "exceeded": True,
@@ -504,7 +502,9 @@ class BudgetMixin:
                                 "used": used_c,
                                 "currency": ov_cur,
                                 "on_exceeded": str(ov.get("on_exceeded") or "stop"),
-                                "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
+                                "fallback_provider_ids": list(
+                                    ov.get("fallback_provider_ids") or []
+                                ),
                                 "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
                                 "stop_message": str(ov.get("stop_message") or ""),
                                 "rule_idx": idx,
@@ -572,9 +572,7 @@ class BudgetMixin:
                 if user_id and lc_user > 0:
                     try:
                         # query_user_cost_total 返回 USD 口径，换算到主货币
-                        _uc = float(
-                            await self.query_user_cost_total(user_id, d_start, pricing)
-                        )
+                        _uc = float(await self.query_user_cost_total(user_id, d_start, pricing))
                         user_total_c = round(_convert(_uc, "USD", main_cur, rates), 6)
                     except Exception:
                         user_total_c = ses_cost

@@ -10,9 +10,14 @@ from cost_control.cost import (
 )
 
 
-def pricing_struct(user=None):
-    """构造 get_pricing 返回的 {defaults, user} 结构（测试辅助）。"""
-    return {"defaults": {m: dict(p) for m, p in DEFAULT_PRICING.items()}, "user": user or {}}
+def pricing_struct(user=None, multipliers=None, provider_clusters=None):
+    """构造 get_pricing 返回的定价结构（测试辅助）。"""
+    return {
+        "defaults": {m: dict(p) for m, p in DEFAULT_PRICING.items()},
+        "user": user or {},
+        "multipliers": multipliers or {},
+        "provider_clusters": provider_clusters or {},
+    }
 
 
 # ===== match_pricing（仅作用于 defaults 表，签名未变）=====
@@ -61,19 +66,19 @@ def test_match_pricing_longest_wins():
 
 def test_match_pricing_vendor_prefix():
     # OpenRouter / NewAPI 风格：厂商前缀 + 大小写混合
-    assert match_pricing("minimax/MiniMax-M2.7", DEFAULT_PRICING)["input"] == 0.25
-    assert match_pricing("deepseek/deepseek-v4-pro", DEFAULT_PRICING)["input"] == 0.435
+    assert match_pricing("minimax/MiniMax-M2.7", DEFAULT_PRICING)["input"] == 0.3
+    assert match_pricing("deepseek/deepseek-v4-pro", DEFAULT_PRICING)["input"] == 0.572808
 
 
 def test_match_pricing_nested_namespace():
     # 多层命名空间前缀：剥到最后一段
-    assert match_pricing("newapi/moonshotai/kimi-k2.6", DEFAULT_PRICING)["input"] == 0.66
+    assert match_pricing("newapi/moonshotai/kimi-k2.6", DEFAULT_PRICING)["input"] == 0.95
 
 
 def test_match_pricing_underscore_and_space():
     # 下划线 / 空格分隔统一为连字符
-    assert match_pricing("MiniMax_M2.7", DEFAULT_PRICING)["input"] == 0.25
-    assert match_pricing("MiniMax M2.7", DEFAULT_PRICING)["input"] == 0.25
+    assert match_pricing("MiniMax_M2.7", DEFAULT_PRICING)["input"] == 0.3
+    assert match_pricing("MiniMax M2.7", DEFAULT_PRICING)["input"] == 0.3
 
 
 def test_match_pricing_version_dot_alignment():
@@ -201,6 +206,31 @@ def test_compute_cost_per_request_single_row_is_zero():
     user = {"prov_x": {"mode": "per_request", "price": 0.05}}
     cost = compute_cost_value({}, "prov_x", "any", pricing_struct(user))
     assert cost == 0.0
+
+
+def test_compute_cost_applies_default_model_cluster_multiplier():
+    usage = {"token_input_other": 1_000_000, "token_input_cached": 0, "token_output": 0}
+    cost = compute_cost_value(
+        usage,
+        "gpt-primary",
+        "gpt-4o",
+        pricing_struct(
+            multipliers={"source-main": 1.5},
+            provider_clusters={"gpt-primary": "source-main"},
+        ),
+    )
+    assert cost == 3.75
+
+
+def test_compute_cost_applies_cluster_multiplier_after_user_override():
+    user = {"prov_x": {"mode": "per_turn", "price": 0.02}}
+    cost = compute_cost_value(
+        {},
+        "prov_x",
+        "anthropic/claude-sonnet-4.5",
+        pricing_struct(user, {"source-main": 2}, {"prov_x": "source-main"}),
+    )
+    assert cost == 0.04
 
 
 # ===== compute_row_cost / compute_cost_grouped（聚合行）=====

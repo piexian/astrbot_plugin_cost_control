@@ -24,6 +24,7 @@ from typing import Any
 
 from .default_pricing import DEFAULT_PRICING
 from .exchange_rates import DEFAULT_RATES
+from .pricing_clusters import normalize_pricing_multipliers
 
 # 配置默认值。键名与 ``_conf_schema.json`` 的顶层项一一对应。
 # object 类型的配置项用嵌套 dict 表示默认值。
@@ -56,6 +57,8 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # 5 维全局默认花费预算的货币代码（dim -> 代码，空=主货币）。
     "budgets_cost_currency": {},
     "pricing": {},  # 用户自定义定价，key=provider_id，value 按 mode（见 get_pricing）
+    # AstrBot Provider Source 供应商聚类倍率，key=provider_source_id；1 倍无需持久化。
+    "pricing_multipliers": {},
     # 局部阈值（每条规则挂自己的 on_exceeded；优先级高于全局 5 维）。
     # 规则对象形如：
     #   {"enabled": bool, "target_type": "umo"|"provider"|"user",
@@ -235,7 +238,7 @@ def get_config(config: dict[str, Any] | None, key: str, default: Any = None) -> 
 
 
 def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
-    """返回生效的定价结构：``{"defaults": {model: {...}}, "user": {provider_id: {...}}}``。
+    """返回生效定价：``{"defaults", "user", "multipliers"}``。
 
     两套 key 空间并存、互不合并：
 
@@ -245,12 +248,16 @@ def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
       ``mode``（``per_token``/``per_turn``/``per_request``/``per_tier``/``tiered_expr``）
       规范化；缺 ``mode`` 视为 ``per_token``（兼容旧结构）。优先级高于 defaults——见
       :func:`cost_control.cost.resolve_pricing`。
+    - ``multipliers``：AstrBot Provider Source 聚类倍率。命中基础规则后统一相乘；
+      未配置即 1 倍。Provider 到 Source 的映射由 :class:`cost_control.cost.CostMixin`
+      在运行时附加，不改变默认模型价的匹配逻辑。
 
     Args:
         config: 插件配置字典。
 
     Returns:
-        ``{"defaults": {model: {input,...}}, "user": {provider_id: {mode,...}}}``。
+        ``{"defaults": {model: {input,...}}, "user": {provider_id: {mode,...}},
+        "multipliers": {cluster_id: float}}``。
         user entry 形如：
         - ``{"mode":"per_token","input":f,"input_cached":f,"output":f,"cache_creation":f|None}``
         - ``{"mode":"per_turn","price":f}`` / ``{"mode":"per_request","price":f}``
@@ -265,7 +272,8 @@ def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
             norm = _normalize_user_entry(entry)
             if norm is not None:
                 user[str(pid)] = norm
-    return {"defaults": defaults, "user": user}
+    multipliers = normalize_pricing_multipliers(get_config(config, "pricing_multipliers", {}) or {})
+    return {"defaults": defaults, "user": user, "multipliers": multipliers}
 
 
 def get_currency_symbol(config: dict[str, Any] | None) -> str:

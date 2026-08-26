@@ -107,8 +107,9 @@ class AiDiagMixin:
 
     def _get_default_provider_id(self) -> str | None:
         """获取 AstrBot 默认聊天 Provider ID。"""
+        # ProviderType 从 entities 导入（manager 模块在非运行态导入会循环依赖）。
         try:
-            from astrbot.core.provider.manager import ProviderType
+            from astrbot.core.provider.entities import ProviderType
 
             prov = self.context.provider_manager.get_using_provider(
                 provider_type=ProviderType.CHAT_COMPLETION,
@@ -118,11 +119,15 @@ class AiDiagMixin:
                 return prov.meta().id
         except Exception:
             pass
-        # 回退：取第一个可用的 chat provider
+        # 回退：取第一个可用的 chat provider。meta.type 是 adapter 名
+        # （openai_chat_completion / openai_responses 等）而非能力类型，
+        # 须按 provider_type 枚举判断，不能与 "chat_completion" 字符串比较。
         try:
+            from astrbot.core.provider.entities import ProviderType
+
             for p in self.context.provider_manager.provider_insts:
                 meta = p.meta()
-                if meta.type == "chat_completion":
+                if meta.provider_type == ProviderType.CHAT_COMPLETION:
                     return meta.id
         except Exception:
             pass
@@ -220,15 +225,17 @@ class AiDiagMixin:
             for s in sups[-20:]:  # 最近20条
                 attr = getattr(s, "attribution", None)
                 if attr and isinstance(attr, dict):
-                    attributions.append({
-                        "umo": str(getattr(s, "umo", "") or "")[:20],
-                        "injection_total": getattr(s, "injection_total", None),
-                        "system": attr.get("system"),
-                        "tools": attr.get("tools"),
-                        "history": attr.get("history"),
-                        "user": attr.get("user"),
-                        "extra": attr.get("extra"),
-                    })
+                    attributions.append(
+                        {
+                            "umo": str(getattr(s, "umo", "") or "")[:20],
+                            "injection_total": getattr(s, "injection_total", None),
+                            "system": attr.get("system"),
+                            "tools": attr.get("tools"),
+                            "history": attr.get("history"),
+                            "user": attr.get("user"),
+                            "extra": attr.get("extra"),
+                        }
+                    )
             data["attribution"] = {
                 "samples": len(attributions),
                 "items": attributions[:10],
@@ -275,14 +282,16 @@ class AiDiagMixin:
                 used = dim_used.get(d, 0)
                 if lt > 0 or lc > 0:
                     ratio = round(used * 100.0 / lt, 1) if lt > 0 else 0
-                    dims.append({
-                        "dimension": dim_labels.get(d, d),
-                        "token_limit": lt,
-                        "token_used": used,
-                        "token_ratio": ratio,
-                        "cost_limit": lc,
-                        "exceeded": used >= lt if lt > 0 else False,
-                    })
+                    dims.append(
+                        {
+                            "dimension": dim_labels.get(d, d),
+                            "token_limit": lt,
+                            "token_used": used,
+                            "token_ratio": ratio,
+                            "cost_limit": lc,
+                            "exceeded": used >= lt if lt > 0 else False,
+                        }
+                    )
             data["budgets"] = {"dimensions": dims}
         except Exception as e:
             data["budgets"] = {"error": str(e)}
@@ -298,16 +307,18 @@ class AiDiagMixin:
                 provider_id = r.get("provider_id") or ""
                 model = r.get("provider_model") or ""
                 if model and resolve_pricing(provider_id or None, model, pricing) is None:
-                    unpriced.append({
-                        "model": model,
-                        "provider_id": provider_id,
-                        "tokens": (
-                            int(r.get("token_input_other", 0) or 0)
-                            + int(r.get("token_input_cached", 0) or 0)
-                            + int(r.get("token_output", 0) or 0)
-                        ),
-                        "count": int(r.get("count", 0) or 0),
-                    })
+                    unpriced.append(
+                        {
+                            "model": model,
+                            "provider_id": provider_id,
+                            "tokens": (
+                                int(r.get("token_input_other", 0) or 0)
+                                + int(r.get("token_input_cached", 0) or 0)
+                                + int(r.get("token_output", 0) or 0)
+                            ),
+                            "count": int(r.get("count", 0) or 0),
+                        }
+                    )
             data["pricing"] = {
                 "total_models": len(rows),
                 "unpriced_count": len(unpriced),
@@ -357,12 +368,8 @@ class AiDiagMixin:
             cache_samples = ov.get("cache_samples", 0)
             avg_inj = ov.get("avg_injection", 0)
             inj_samples = ov.get("injection_samples", 0)
-            cost_models = json.dumps(
-                ov.get("cost_by_model", []), ensure_ascii=False
-            )[:600]
-            top_sessions = json.dumps(
-                ov.get("top_sessions_by_cost", []), ensure_ascii=False
-            )[:400]
+            cost_models = json.dumps(ov.get("cost_by_model", []), ensure_ascii=False)[:600]
+            top_sessions = json.dumps(ov.get("top_sessions_by_cost", []), ensure_ascii=False)[:400]
             sections.append(
                 f"## 成本与用量（{ov.get('window', '近7天')}）\n"
                 f"总成本：{ov.get('cost', 0)}，"
@@ -405,13 +412,8 @@ class AiDiagMixin:
         # 4. 预算状态
         bd = data.get("budgets", {})
         if "error" not in bd:
-            bd_dims = json.dumps(
-                bd.get("dimensions", []), ensure_ascii=False
-            )[:600]
-            sections.append(
-                f"## 预算状态\n"
-                f"已配置的预算维度：{bd_dims}"
-            )
+            bd_dims = json.dumps(bd.get("dimensions", []), ensure_ascii=False)[:600]
+            sections.append(f"## 预算状态\n已配置的预算维度：{bd_dims}")
         else:
             sections.append(f"## 预算状态\n状态：数据获取失败（{bd.get('error')}）")
 
@@ -494,9 +496,7 @@ class AiDiagMixin:
         result["provider_id"] = provider_id
         result["provider_name"] = self._get_provider_display_name(provider_id)
         if not provider_id:
-            result["error"] = (
-                "未找到可用的聊天模型 Provider，请在 AstrBot 配置中添加 LLM 提供商。"
-            )
+            result["error"] = "未找到可用的聊天模型 Provider，请在 AstrBot 配置中添加 LLM 提供商。"
             return result
 
         # 2. 收集维度数据
@@ -534,7 +534,5 @@ class AiDiagMixin:
         except Exception as e:
             err_msg = f"{type(e).__name__}: {e}"
             result["error"] = err_msg
-            logger.error(
-                "[cost_control] AI诊断失败：%s\n%s", err_msg, traceback.format_exc()
-            )
+            logger.error("[cost_control] AI诊断失败：%s\n%s", err_msg, traceback.format_exc())
         return result

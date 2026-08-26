@@ -19,6 +19,8 @@ interface SettingField {
   width?: number;
   /** select 类型的可选值 */
   options?: string[];
+  /** 字段实际读写的配置分组（默认取所在 section 的 key；跨组聚合展示时显式指定）。 */
+  group?: string;
 }
 
 interface SettingSection {
@@ -54,11 +56,52 @@ const SECTIONS: SettingSection[] = [
         options: CURRENCY_OPTIONS,
         help: "所有费用最终换算并以此货币结算和显示。内置定价以 USD 计价，切换后自动按汇率交叉换算。",
       },
+    ],
+  },
+  {
+    key: "alerts",
+    title: "超预算告警",
+    desc: "超预算时主动推送提醒的策略；关闭后仍会按策略拦截请求，只是不再推送提醒。",
+    fields: [
       {
-        k: "ai_diag_provider_id",
-        label: "AI 诊断 Provider",
-        type: "dynamic-select",
-        help: "首页「AI 成本诊断」使用的 LLM Provider。留空 = 使用 AstrBot 默认 Provider。",
+        k: "enabled",
+        label: "启用超预算主动推送",
+        type: "bool",
+        help: "超限时主动发消息提醒。关闭后仍会按策略拦截请求，只是不再推送提醒。",
+      },
+      {
+        k: "cooldown_seconds",
+        label: "告警冷却（秒）",
+        type: "int",
+        width: 100,
+        help: "同一告警的最短重复间隔，避免刷屏；0 = 不冷却（每次超限都推）。",
+      },
+    ],
+  },
+  {
+    key: "report",
+    title: "每日日报",
+    desc: "每天定时向指定会话推送一次用量与成本汇总。开关、时间与接收方集中在此配置。",
+    fields: [
+      {
+        k: "enable_daily_report",
+        group: "schedule",
+        label: "启用每日用量日报",
+        type: "bool",
+        help: "开启后，每天按下方「日报推送时间」自动推送一次用量汇总到「日报接收方」。",
+      },
+      {
+        k: "daily_report_time",
+        label: "日报推送时间",
+        type: "str",
+        width: 100,
+        help: "本地时区 HH:MM，到点自动推送（需开启上方「启用每日用量日报」）。",
+      },
+      {
+        k: "daily_report_to",
+        label: "日报接收方",
+        type: "csv",
+        help: "接收日报的会话 UMO 列表，逗号分隔。在目标会话中向 Bot 发送 /sid 即可获取该会话的 UMO；/sid 是 AstrBot 的内置指令，需在 WebUI「插件管理」中启用「内置指令」插件后才可用。",
       },
     ],
   },
@@ -107,39 +150,6 @@ const SECTIONS: SettingSection[] = [
     ],
   },
   {
-    key: "alerts",
-    title: "告警与日报",
-    desc: "超预算提醒的推送策略，以及日报的推送时间与接收方。",
-    fields: [
-      {
-        k: "enabled",
-        label: "启用超预算主动推送",
-        type: "bool",
-        help: "超限时主动发消息提醒。关闭后仍会按策略拦截请求，只是不再推送提醒。",
-      },
-      {
-        k: "cooldown_seconds",
-        label: "告警冷却（秒）",
-        type: "int",
-        width: 100,
-        help: "同一告警的最短重复间隔，避免刷屏；0 = 不冷却（每次超限都推）。",
-      },
-      {
-        k: "daily_report_time",
-        label: "日报推送时间",
-        type: "str",
-        width: 100,
-        help: "本地时区 HH:MM。需同时开启「定时任务 → 启用每日用量日报」才会到点自动推送。",
-      },
-      {
-        k: "daily_report_to",
-        label: "日报接收方",
-        type: "csv",
-        help: "日报接收方的会话 / UMO ID 列表，逗号分隔。",
-      },
-    ],
-  },
-  {
     key: "attribution",
     title: "上下文归因",
     desc: "拆分每次请求的 token 来源占比（系统提示词 / 工具 / 历史对话 / 用户输入），看清上下文膨胀的构成。",
@@ -160,22 +170,16 @@ const SECTIONS: SettingSection[] = [
     ],
   },
   {
-    key: "schedule",
-    title: "定时任务",
-    desc: "每日用量日报与过期数据的自动清理。",
+    key: "ai_diag",
+    title: "AI 诊断",
+    desc: "首页「AI 成本诊断」功能使用的 LLM。",
     fields: [
       {
-        k: "enable_daily_report",
-        label: "启用每日用量日报",
-        type: "bool",
-        help: "开启后，每天到「告警与日报 → 日报推送时间」自动推送一次用量汇总。",
-      },
-      {
-        k: "retain_days",
-        label: "历史保留天数",
-        type: "int",
-        width: 100,
-        help: "补充记录的保留天数，到期后定时清理；0 = 永不清理。",
+        k: "ai_diag_provider_id",
+        group: "_master",
+        label: "AI 诊断 Provider",
+        type: "dynamic-select",
+        help: "首页「AI 成本诊断」使用的 LLM Provider。留空 = 使用 AstrBot 默认 Provider。",
       },
     ],
   },
@@ -399,7 +403,8 @@ export function SettingsView({
           {sec.desc && <p className="section-desc">{sec.desc}</p>}
           <div className="set-fields">
             {sec.fields.map((f) => {
-              const v = valOf(edit, sec.key, f.k);
+              const g = f.group ?? sec.key;
+              const v = valOf(edit, g, f.k);
               if (f.type === "bool") {
                 return (
                   <div className="set-field" key={f.k}>
@@ -411,7 +416,7 @@ export function SettingsView({
                       <input
                         type="checkbox"
                         checked={!!v}
-                        onChange={(e) => setField(sec.key, f.k, "bool", e.target.checked)}
+                        onChange={(e) => setField(g, f.k, "bool", e.target.checked)}
                       />
                       <span className="slider" />
                     </label>
@@ -428,7 +433,7 @@ export function SettingsView({
                         type="text"
                         className="budget-input set-csv-input"
                         defaultValue={Array.isArray(v) ? v.join(", ") : String(v || "")}
-                        onBlur={(e) => setField(sec.key, f.k, "csv", e.target.value)}
+                        onBlur={(e) => setField(g, f.k, "csv", e.target.value)}
                       />
                     </div>
                   </div>
@@ -444,7 +449,7 @@ export function SettingsView({
                     <select
                       className="budget-input set-field-control"
                       value={String(v || "")}
-                      onChange={(e) => setField(sec.key, f.k, "select", e.target.value)}
+                      onChange={(e) => setField(g, f.k, "select", e.target.value)}
                       style={{ width: f.width ?? 140 }}
                     >
                       {(f.options || []).map((opt) => (
@@ -467,7 +472,7 @@ export function SettingsView({
                       className="budget-input set-field-control"
                       value={String(v || "")}
                       onChange={(e) =>
-                        setField(sec.key, f.k, "dynamic-select", e.target.value)
+                        setField(g, f.k, "dynamic-select", e.target.value)
                       }
                       style={{ width: f.width ?? 220 }}
                     >
@@ -491,7 +496,7 @@ export function SettingsView({
                     type={f.type === "int" ? "number" : "text"}
                     className="budget-input set-field-control"
                     value={v === "" ? "" : String(v)}
-                    onChange={(e) => setField(sec.key, f.k, f.type, e.target.value)}
+                    onChange={(e) => setField(g, f.k, f.type, e.target.value)}
                     style={{ width: f.width ?? 140 }}
                   />
                 </div>
@@ -504,8 +509,26 @@ export function SettingsView({
       <Panel>
         <h2>数据管理</h2>
         <p className="section-desc">
-          手动执行清理、推送，或按模块清空全部数据。
+          数据保留策略与手动清理、推送，或按模块清空全部数据。
         </p>
+
+        <div className="set-fields">
+          <div className="set-field">
+            <div className="set-field-text">
+              <div className="set-field-label">历史保留天数</div>
+              <div className="set-field-help">
+                补充记录的保留天数，到期后定时自动清理；0 = 永不清理。下方「清理过期数据」按此天数立即清理一次。
+              </div>
+            </div>
+            <input
+              type="number"
+              className="budget-input set-field-control"
+              value={String(valOf(edit, "schedule", "retain_days"))}
+              onChange={(e) => setField("schedule", "retain_days", "int", e.target.value)}
+              style={{ width: 100 }}
+            />
+          </div>
+        </div>
 
         <div className="data-mgmt-section">
           <div className="data-mgmt-label">快速操作</div>

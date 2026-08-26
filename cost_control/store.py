@@ -429,6 +429,23 @@ class StoreMixin:
             logger.warning("[cost_control] cleanup_old_supplements 失败: %s", e)
             return 0
 
+    async def delete_supplements_by_provider(self, provider_id: str) -> int:
+        """按精确 Provider ID 删除插件补充采集记录。
+
+        与 :meth:`UsageQueryMixin.delete_usage_by_provider` 配套，用于删除已下线
+        Provider 的完整历史用量。异常向上抛出，让调用方能够向用户报告失败。
+        """
+        pid = str(provider_id or "").strip()
+        if not pid:
+            return 0
+        maker = await self._ensure_session_maker()
+        async with maker() as session:
+            result = await session.execute(
+                delete(CostSupplement).where(CostSupplement.provider_id == pid)
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
     async def purge_module(self, module: str) -> int:
         """清空指定模块的全部数据（不可恢复），返回删除条数。
 

@@ -1,7 +1,8 @@
 """成本计算 Mixin。
 
 根据生效的定价结构（:func:`cost_control.config.get_pricing` 返回的
-``{"defaults", "user"}``）把 token 用量 / 调用次数 / 请求数换算为 USD 成本。
+``{"defaults", "user", "multipliers"}``，运行时再附加 ``provider_clusters``）把
+token 用量 / 调用次数 / 请求数换算为 USD 成本。
 
 支持五种计费模式（``mode``）：
 - ``per_token``：按 input / input_cached / output（+cache_creation）token 计费，
@@ -142,30 +143,75 @@ def resolve_pricing(
         ``tiered_expr``），或 ``None``。
     """
     user = pricing.get("user") if isinstance(pricing, dict) else None
+    rule: dict[str, Any] | None = None
     if isinstance(user, dict) and provider_id:
         # 1. 模型级手工价（精确 key）
         if model:
             exact = user.get(f"{provider_id}|{model}")
             if isinstance(exact, dict) and exact.get("mode"):
-                return _inherit_per_token(exact, provider_id, model, pricing)
+                return _apply_cluster_multiplier(
+                    _inherit_per_token(exact, provider_id, model, pricing), provider_id, pricing
+                )
         # 2. 候选价格（用户确认 / 自动匹配）
         sel = _resolve_selection(provider_id, model, pricing)
         if sel is not None:
-            return sel
+            return _apply_cluster_multiplier(sel, provider_id, pricing)
         # 3. 旧 provider 级手工价（模糊，排除模型级 key）
         legacy = {k: v for k, v in user.items() if "|" not in k}
         key = _best_match_key(provider_id, legacy)
         if key is not None:
-            rule = legacy[key]
-            if isinstance(rule, dict) and rule.get("mode"):
-                return _inherit_per_token(rule, provider_id, model, pricing)
+            candidate = user[key]
+            if isinstance(candidate, dict) and candidate.get("mode"):
+                rule = _inherit_per_token(candidate, provider_id, model, pricing)
+    if rule is not None:
+        return _apply_cluster_multiplier(rule, provider_id, pricing)
     # 4. 内置默认表
     defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
+    matched_model: str | None = None
     if isinstance(defaults, dict):
-        prices = match_pricing(model, defaults)
-        if prices:
-            return {"mode": "per_token", **prices}
-    return None
+        matched_model = _best_match_key(model, defaults)
+        if matched_model is not None:
+            prices = defaults[matched_model]
+            if isinstance(prices, dict) and prices:
+                rule = {"mode": "per_token", **prices}
+    if rule is None:
+        return None
+    return _apply_cluster_multiplier(rule, provider_id, pricing)
+
+
+def _apply_cluster_multiplier(
+    rule: dict[str, Any],
+    provider_id: str | None,
+    pricing: dict[str, Any],
+) -> dict[str, Any]:
+    """按 AstrBot Provider Source 聚类倍率调整规则副本，不修改基础价格。"""
+    multipliers = pricing.get("multipliers") if isinstance(pricing, dict) else None
+    provider_clusters = pricing.get("provider_clusters") if isinstance(pricing, dict) else None
+    if (
+        not provider_id
+        or not isinstance(multipliers, dict)
+        or not isinstance(provider_clusters, dict)
+    ):
+        return rule
+    cluster_id = provider_clusters.get(provider_id)
+    if not cluster_id:
+        return rule
+    try:
+        multiplier = float(multipliers.get(cluster_id, 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return rule
+    if multiplier <= 0 or abs(multiplier - 1.0) <= 1e-12:
+        return rule
+
+    out = dict(rule)
+    if out.get("mode", "per_token") == "per_token":
+        for field in ("input", "input_cached", "output", "cache_creation"):
+            value = out.get(field)
+            if value is not None:
+                out[field] = float(value or 0.0) * multiplier
+    elif out.get("price") is not None:
+        out["price"] = float(out.get("price", 0.0) or 0.0) * multiplier
+    return out
 
 
 def _resolve_selection(
@@ -652,10 +698,11 @@ class CostMixin:
     """按生效定价计算 USD 成本的 Mixin。"""
 
     def get_pricing(self) -> dict[str, Any]:
-        """返回当前生效的定价结构，并注入价格目录与候选选择（``catalog``/``selections``）。
+        """返回当前生效的定价结构，并注入价格目录、候选选择与供应商聚类映射。
 
-        ``catalog``/``selections`` 供 :func:`resolve_pricing` 做候选价格解析；目录不可用或
-        损坏时降级为空（仅靠 defaults/user），保证成本计算永不被打断。
+        ``catalog``/``selections`` 供 :func:`resolve_pricing` 做候选价格解析；
+        ``provider_clusters`` 供 :func:`_apply_cluster_multiplier` 套用聚类倍率；
+        目录不可用或损坏时降级为空（仅靠 defaults/user），保证成本计算永不被打断。
         """
         cfg = getattr(self, "cfg", None)
         pricing = get_pricing(cfg)
@@ -663,8 +710,11 @@ class CostMixin:
         try:
             from .config import get_price_selections
             from .price_catalog import load_catalog
+            from .pricing_clusters import provider_cluster_map_from_config
 
             pricing["selections"] = get_price_selections(cfg)
+            astrbot_config = self.context.get_config() or {}
+            pricing["provider_clusters"] = provider_cluster_map_from_config(astrbot_config)
             data_dir = getattr(self, "_data_dir", None)
             if not data_dir:
                 get_data_dir = getattr(self, "get_data_dir", None)
@@ -676,6 +726,7 @@ class CostMixin:
                 }
                 pricing["catalog_obj"] = catalog
         except Exception:
+            pricing.setdefault("provider_clusters", {})
             pass
         return pricing
 

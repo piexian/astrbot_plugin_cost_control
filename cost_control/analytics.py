@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo
 
 from .budget import day_window_start, resolve_tz
 from .cache_diag import hit_rate
-from .config import get_config, get_pricing
-from .cost import compute_cost_in_main, compute_cost_value, compute_row_cost, compute_row_cost_in_main
+from .config import get_config
+from .cost import compute_cost_in_main, compute_row_cost, compute_row_cost_in_main
 
 
 def report_window_start(
@@ -191,6 +191,7 @@ class AnalyticsMixin:
     query_usage: Any
     query_usage_grouped: Any
     query_supplements: Any
+    get_pricing: Any
 
     async def build_report(self, *, window: str = "daily") -> dict[str, Any]:
         """构建指定时间窗的用量 / 成本 / 缓存 / 归因综合报表。
@@ -208,7 +209,7 @@ class AnalyticsMixin:
         tz = resolve_tz(self.context)
         refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
         start = report_window_start(window, now, tz, refresh)
-        pricing = get_pricing(getattr(self, "cfg", None))
+        pricing = self.get_pricing()
         from .config import get_currency_symbol, get_rates
 
         main_cur = get_currency_symbol(getattr(self, "cfg", None))

@@ -22,7 +22,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 
 from .attributor import ESTIMATION_NOTE
 from .budget import _DIM_ORDER, day_window_start, resolve_tz
-from .config import get_config, get_pricing
+from .config import get_config
 from .cost import compute_row_cost
 from .exchange_rates import currency_to_symbol, get_main_currency
 
@@ -67,6 +67,7 @@ class CommandsMixin:
     check_hit_rate: Any
     recent_events: Any
     build_report: Any
+    get_pricing: Any
 
     def _umo(self, event: AstrMessageEvent) -> str:
         return str(getattr(event, "unified_msg_origin", None) or "")
@@ -83,7 +84,7 @@ class CommandsMixin:
             d_start = self._day_start()
             usage = await self.query_usage(umo=umo, start=d_start)
             rows = await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start)
-            pricing = get_pricing(getattr(self, "cfg", None))
+            pricing = self.get_pricing()
             sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
             cost = round(sum(compute_row_cost(r, pricing) for r in rows), 6)
             lines = [

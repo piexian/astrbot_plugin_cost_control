@@ -32,6 +32,21 @@ def test_extract_cache_openai_prompt_tokens_details():
     assert cr == 150
 
 
+def test_extract_cache_openai_responses_input_tokens_details():
+    # openai_responses 供应商的 raw_completion.usage 是 ResponseUsage：
+    # input_tokens / output_tokens / input_tokens_details.cached_tokens
+    itd = SimpleNamespace(cached_tokens=150)
+    usage = SimpleNamespace(
+        input_tokens=1000,
+        output_tokens=500,
+        input_tokens_details=itd,
+        output_tokens_details=SimpleNamespace(reasoning_tokens=99),
+    )
+    cc, cr, _ = _extract_cache(SimpleNamespace(usage=usage))
+    assert cc is None
+    assert cr == 150
+
+
 def test_extract_cache_deepseek_extension_fields():
     usage = SimpleNamespace(prompt_cache_hit_tokens=80, prompt_cache_miss_tokens=20)
     cc, cr, _ = _extract_cache(SimpleNamespace(usage=usage))

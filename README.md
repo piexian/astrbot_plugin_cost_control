@@ -55,7 +55,7 @@ WebUI 内嵌 7 个页面,配置改动**自动保存、热生效**,无需重载�
 | **预算** | 5 维 token + 花费双限额、局部阈值、备用 Provider 库、全局默认处理动作 |
 | **缓存** | 命中率趋势、4 类破坏诊断事件、system/tools 差异 diff |
 | **上下文** | 每轮请求的 system / tools / history / user 注入量分解 |
-| **定价** | 多源价格同步、候选比价与自定义 provider 单价（含 `per_tier` / `tiered_expr`） |
+| **定价** | 按 AstrBot Provider Source 聚类现有模型、设置供应商倍率，并支持多源价格同步、候选比价与自定义 provider 单价（含 `per_tier` / `tiered_expr`） |
 | **设置** | 功能开关、刷新时刻、缓存告警阈值、定时日报、归因采样率等 |
 
 ---
@@ -133,10 +133,10 @@ WebUI 内嵌 7 个页面,配置改动**自动保存、热生效**,无需重载�
 2. 同表「全局每日」行的**「花费 $」**列填 `3`（日度次级护栏）。
 3. 底部「全局默认超限处理」选**「硬拦截」**。
 
-再到**「设置」tab** 配置日报推送:
+再到**「设置」tab** 的「每日日报」面板配置推送:
 
-4. 打开「告警」开关,「每日日报时间」填 `09:00`。
-5. 「日报推送目标」添加会话标识（如群号）。
+4. 打开「启用每日用量日报」,「日报推送时间」填 `09:00`。
+5. 「日报接收方」填入目标会话的 UMO —— 在目标会话中向 Bot 发送 `/sid` 即可获取(`/sid` 是 AstrBot 的内置指令,需在 WebUI「插件管理」中启用「内置指令」插件后才可用)。
 
 ### 5 个维度怎么选
 
@@ -169,6 +169,7 @@ WebUI 内嵌 7 个页面,配置改动**自动保存、热生效**,无需重载�
 | `price_sources` | 三个公共源启用 | 价格目录源开关；`newapi:<provider_id>` 可绑定已配置的 New API Provider |
 | `price_selections` | `{}` | 用户确认的 `(provider_id, model)` 目录价格选择 |
 | `price_sync` | `{"auto_enabled": false, "cron": "0 4 * * *"}` | 价格同步的定时开关与 Cron 表达式 |
+| `pricing_multipliers` | `{}` | AstrBot Provider Source 供应商倍率(0.01–100,缺省 1 倍) |
 | `cache_diag` | 见下 | 缓存诊断开关与告警阈值 |
 | `alerts` | 见下 | 告警推送、冷却、日报 |
 | `prompt_optimizer` | 见下 | prompt 优化器 |
@@ -188,7 +189,7 @@ WebUI 内嵌 7 个页面,配置改动**自动保存、热生效**,无需重载�
     "enabled": true,
     "cooldown_seconds": 300,             // 同一目标告警冷却
     "daily_report_time": "09:00",
-    "daily_report_to": []                // 日报推送目标
+    "daily_report_to": []                // 日报接收方 UMO 列表(目标会话发 /sid 获取)
   },
   "prompt_optimizer": {
     "enabled": true,
