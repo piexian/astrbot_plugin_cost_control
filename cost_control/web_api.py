@@ -1663,16 +1663,32 @@ class WebApiMixin:
         return getattr(self, "_data_dir", None) or str(self.get_data_dir())
 
     def _provider_cfg_fn(self):
-        """构建 ``provider_id → provider 配置 dict`` 回调（供 New API 源解析 api_base/key）。"""
+        """构建 ``provider_id → provider 配置 dict`` 回调（供 New API 源解析 api_base/key）。
+
+        provider 顶层无 ``api_base`` 时（4.25+ source 架构），用 ``provider_source_id``
+        从 ``provider_sources[]`` 条目回填 ``api_base``，供 derive_newapi_root 剥离 /v1。
+        """
 
         def _get(pid: str) -> dict[str, Any] | None:
             try:
                 cfg = self.context.get_config() or {}
                 prov_list = cfg.get("provider") if isinstance(cfg, dict) else None
-                if isinstance(prov_list, list):
-                    for p in prov_list:
-                        if isinstance(p, dict) and str(p.get("id") or "").strip() == pid:
+                if not isinstance(prov_list, list):
+                    return None
+                for p in prov_list:
+                    if isinstance(p, dict) and str(p.get("id") or "").strip() == pid:
+                        if p.get("api_base"):
                             return p
+                        source_list = cfg.get("provider_sources") if isinstance(cfg, dict) else None
+                        sid = str(p.get("provider_source_id") or "").strip()
+                        if isinstance(source_list, list) and sid:
+                            for s in source_list:
+                                if (
+                                    isinstance(s, dict)
+                                    and str(s.get("id") or "").strip() == sid
+                                ):
+                                    return {**p, "api_base": s.get("api_base")}
+                        return p
             except Exception:
                 pass
             return None

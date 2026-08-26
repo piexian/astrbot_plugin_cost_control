@@ -599,9 +599,10 @@ def _resolve_source_request(
     if is_newapi_source(source):
         pid = newapi_provider_id(source) or ""
         settings = _source_settings(cfg, source)
-        base_url = str(settings.get("base_url") or "").strip()
+        base_url = derive_newapi_root(str(settings.get("base_url") or ""))
         provider = provider_cfg(pid) if (provider_cfg and pid) else None
         if not base_url and provider:
+            # settings 未配时从 provider 推导；api_base 可能带 /v1，统一剥掉
             base_url = derive_newapi_root(str(provider.get("api_base") or ""))
         if not base_url:
             return "", {}, f"New API 源 {source} 缺少 base_url 且无法从 provider 推导", "", pid

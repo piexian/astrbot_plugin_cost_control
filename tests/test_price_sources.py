@@ -259,6 +259,54 @@ def test_sync_source_newapi_uses_provider_key(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer sk-secret"
 
 
+
+def test_sync_source_newapi_strips_v1_from_manual_base_url(monkeypatch):
+    """手动填写的 base_url 带 /v1 时同样剥掉，避免拼出 /v1/api/pricing。"""
+    captured = {}
+
+    def fake(url, headers, timeout):
+        captured["url"] = url
+        return b"{}", 200, {}, ""
+
+    monkeypatch.setattr(ps, "_http_get", fake)
+    cfg = {"price_sources": {"newapi:us": {"enabled": True, "base_url": "https://na/x/v1/"}}}
+    res = ps.sync_source("newapi:us", None, cfg=cfg, provider_cfg=lambda pid: None)
+    assert res.status == "ok"
+    assert captured["url"] == "https://na/x/api/pricing"
+
+
+def test_provider_cfg_fn_falls_back_to_provider_sources_api_base():
+    """4.25+ source 架构：provider 无顶层 api_base 时从 provider_sources[] 回填。"""
+    from types import SimpleNamespace
+
+    from cost_control.web_api import WebApiMixin
+
+    api = WebApiMixin()
+    api.context = SimpleNamespace(
+        get_config=lambda: {
+            "provider_sources": [
+                {"id": "newapi", "api_base": "http://localhost:3000/v1", "enable": True},
+            ],
+            "provider": [
+                {"id": "newapi/glm-5.2", "provider_source_id": "newapi", "model": "glm-5.2"},
+            ],
+        },
+    )
+    fn = api._provider_cfg_fn()
+    p = fn("newapi/glm-5.2")
+    assert p is not None
+    assert p["api_base"] == "http://localhost:3000/v1"
+    # derive 链路最终得到正确 URL
+    url = ps.newapi_pricing_url(ps.derive_newapi_root(str(p["api_base"])))
+    assert url == "http://localhost:3000/api/pricing"
+    # 顶层有 api_base 的旧结构不受影响
+    legacy_fn_ret = None
+    api.context.get_config = lambda: {
+        "provider": [{"id": "p1", "api_base": "https://x/v1"}],
+    }
+    legacy_fn_ret = api._provider_cfg_fn()("p1")
+    assert legacy_fn_ret["api_base"] == "https://x/v1"
+
 def test_sync_all_isolates_failures_and_saves(monkeypatch, tmp_path):
     litellm_url = ps.SOURCE_URLS["litellm"]
     bodies = {
