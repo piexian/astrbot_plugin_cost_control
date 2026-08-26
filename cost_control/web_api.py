@@ -1584,6 +1584,7 @@ class WebApiMixin:
             auto_selected: dict[str, Any] = {}
             try:
                 from .config import get_price_selections, get_price_sources
+                from .cost import _catalog_field_values
                 from .price_catalog import select_auto_candidate
 
                 cat = self._load_catalog()
@@ -1615,13 +1616,7 @@ class WebApiMixin:
                             continue
                         _entry = cat.prices.get(str(_sel.get("price_key") or ""))
                         if _entry is not None:
-                            _d = _entry.to_dict()
-                            _sel["price"] = {
-                                "input": _d.get("input"),
-                                "input_cached": _d.get("input_cached"),
-                                "output": _d.get("output"),
-                                "cache_creation": _d.get("cache_creation"),
-                            }
+                            _sel["price"] = _catalog_field_values(_entry.to_dict())
                 for p in provider_models:
                     pid = p.get("id") or ""
                     if not pid:

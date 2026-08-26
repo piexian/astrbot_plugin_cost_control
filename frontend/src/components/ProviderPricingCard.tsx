@@ -259,6 +259,7 @@ function collapsedSummary(
   draft: DraftEntry,
   matchedDefault: MatchedDefault | null,
   hasOverride: boolean,
+  activePrice: PriceSelection["price"] | null,
 ): string {
   if (hasOverride) {
     if (draft.mode === "per_token" || draft.mode === "per_tier") {
@@ -274,6 +275,14 @@ function collapsedSummary(
     return `${draft.price} ${draft.currency || "USD"} / ${
       draft.mode === "per_turn" ? "轮" : "次"
     }`;
+  }
+  // 已选/自动来源价优先于内置默认（与徽标优先级一致）
+  if (activePrice) {
+    const parts: string[] = [];
+    if (activePrice.input != null) parts.push(`输入 ${activePrice.input}`);
+    if (activePrice.output != null) parts.push(`输出 ${activePrice.output}`);
+    const s = parts.join(" / ");
+    if (s) return s;
   }
   if (matchedDefault) {
     const e = matchedDefault.entry;
@@ -523,7 +532,12 @@ export function ProviderPricingCard({
           {deleteError && <span className="pricing-delete-error">{deleteError}</span>}
           {!expanded && (
             <span className="pricing-collapsed-summary">
-              {collapsedSummary(draft, matchedDefault ?? null, !!hasUserOverride)}
+              {collapsedSummary(
+                draft,
+                matchedDefault ?? null,
+                !!hasUserOverride,
+                activeSelection?.price ?? null,
+              )}
             </span>
           )}
           {!expanded && (
