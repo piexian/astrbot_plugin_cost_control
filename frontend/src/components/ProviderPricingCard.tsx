@@ -66,7 +66,17 @@ const TOKEN_FIELDS: { key: keyof DraftEntry; label: string }[] = [
 
 const fmtStr = (v: number | null | undefined): string => (v == null ? "" : String(v));
 
-export function entryToDraft(entry?: UserPricingEntry): DraftEntry {
+// 新建草稿的默认计价货币：跟随主货币；USD 归一为 ""（内部基准，不落库 currency 字段），
+// 不在受支持列表的代码回退 ""，避免下拉框出现无法命中的值。
+export function normalizeDefaultCurrency(code?: string | null): string {
+  const c = String(code || "").trim().toUpperCase();
+  return c && c !== "USD" && CURRENCY_OPTIONS.includes(c) ? c : "";
+}
+
+export function entryToDraft(
+  entry?: UserPricingEntry,
+  defaultCurrency?: string,
+): DraftEntry {
   const d: DraftEntry = {
     mode: entry?.mode ?? "per_token",
     input: "",
@@ -74,7 +84,8 @@ export function entryToDraft(entry?: UserPricingEntry): DraftEntry {
     output: "",
     cache_creation: "",
     price: "",
-    currency: entry?.currency ?? "",
+    // 已保存条目：currency 缺省即 USD 基准价，保持 USD 展示；新建草稿跟随主货币
+    currency: entry ? (entry.currency ?? "") : normalizeDefaultCurrency(defaultCurrency),
     contextTiers: [],
     serviceTiers: [],
     expr: "",
@@ -276,35 +287,34 @@ function collapsedSummary(
 
 export function ProviderPricingCard({
   providerId,
-  displayId,
   type,
   candidates,
   draft,
   matchedDefault,
   hasUserOverride,
-  isHistorical,
+  isDeletedResidue,
   hasUsage,
   highlightSignal,
   selections,
   autoPriceKeys,
   priceCandidatesByModel,
   newApiSource,
-  selecting,
+  selectingKey,
   onSelectCandidate,
   onResetSelection,
   onEnableNewApiSource,
   onDisableNewApiSource,
   onChange,
   onClear,
+  onDeleteData,
 }: {
   providerId: string;
-  displayId?: string;
   type?: string;
   candidates: string[];
   draft: DraftEntry;
   matchedDefault?: MatchedDefault | null;
   hasUserOverride?: boolean;
-  isHistorical?: boolean;
+  isDeletedResidue?: boolean;
   /** 该 provider 是否存在未定价用量（告警） */
   hasUsage?: boolean;
   /** 外部跳转信号：每次点击未定价告警时递增，触发脉冲动画 */
@@ -317,18 +327,25 @@ export function ProviderPricingCard({
   priceCandidatesByModel?: Record<string, CandidateBrief[]>;
   /** 该 provider 对应的 New API 源（F1.2/F6.2）；null=已探测非 New API 或未配置 */
   newApiSource?: { sourceId: string; enabled: boolean };
-  selecting?: boolean;
+  /** 正在选取/取消的 (provider|model) 键，用于按模型级 loading */
+  selectingKey?: string;
   onSelectCandidate?: (model: string, priceKey: string) => Promise<void>;
   onResetSelection?: (model: string) => Promise<void>;
   onEnableNewApiSource?: () => Promise<void>;
   onDisableNewApiSource?: () => Promise<void>;
   onChange: (patch: Partial<DraftEntry>) => void;
   onClear: () => void;
+  /** 已删除供应商残留的删除按钮回调 */
+  onDeleteData?: () => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
   // 自定义定价也默认折叠；仅未定价（无内置匹配）时默认展开以提示用户
   const [expanded, setExpanded] = useState<boolean>(!matchedDefault);
   const [newApiBusy, setNewApiBusy] = useState(false);
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const deleteArmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 外部跳转信号 → 滚动到视图 + 触发脉冲动画
   useEffect(() => {
@@ -405,6 +422,27 @@ export function ProviderPricingCard({
   const hasSource = !!activeSelection || !!activeAutoKey;
   const isUnpriced = !hasUserOverride && !matchedDefault && !hasSource;
 
+  const deleteResidueData = async () => {
+    if (!onDeleteData || deleting) return;
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      setDeleteError("");
+      if (deleteArmTimer.current) clearTimeout(deleteArmTimer.current);
+      deleteArmTimer.current = setTimeout(() => setDeleteArmed(false), 4000);
+      return;
+    }
+    if (deleteArmTimer.current) clearTimeout(deleteArmTimer.current);
+    setDeleteArmed(false);
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await onDeleteData();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : String(e));
+      setDeleting(false);
+    }
+  };
+
   // 生效来源徽标（F6.3）：自定义 > 已选源 > 自动匹配 > 内置默认 > 未定价
   const sourceBadge = hasUserOverride
     ? null
@@ -424,7 +462,7 @@ export function ProviderPricingCard({
 
   const cardClass = [
     "pricing-card",
-    isHistorical ? "is-historical" : "",
+    isDeletedResidue ? "is-deleted-residue" : "",
     !expanded ? "is-collapsed" : "",
     isUnpriced && hasUsage ? "is-unpriced-alert" : "",
     isUnpriced && !hasUsage ? "is-unpriced-warn" : "",
@@ -439,10 +477,10 @@ export function ProviderPricingCard({
         style={!expanded ? { cursor: "pointer" } : undefined}
       >
         <div className="pricing-id-wrap">
-          <span className="mono pricing-id">{displayId || providerId}</span>
-          {isHistorical && (
-            <span className="pricing-tag-historical" title="该 Provider 已不在当前配置中，但仍有用量记录">
-              历史
+          <span className="mono pricing-id">{providerId}</span>
+          {isDeletedResidue && (
+            <span className="pricing-tag-residue" title="该 Provider 已不在当前配置中，但仍有用量记录">
+              残留
             </span>
           )}
           {type && <span className="muted small">{type}</span>}
@@ -460,6 +498,21 @@ export function ProviderPricingCard({
           className="pricing-head-right"
           style={{ display: "flex", alignItems: "center", gap: 8 }}
         >
+          {isDeletedResidue && onDeleteData && (
+            <button
+              type="button"
+              className={`pricing-delete-residue ${deleteArmed ? "is-armed" : ""}`}
+              disabled={deleting}
+              onClick={(e) => {
+                e.stopPropagation();
+                void deleteResidueData();
+              }}
+              title="永久删除该 Provider 的历史用量、补充记录和旧定价"
+            >
+              {deleting ? "删除中…" : deleteArmed ? "⚠ 确认删除" : "删除残留数据"}
+            </button>
+          )}
+          {deleteError && <span className="pricing-delete-error">{deleteError}</span>}
           {!expanded && (
             <span className="pricing-collapsed-summary">
               {collapsedSummary(draft, matchedDefault ?? null, !!hasUserOverride)}
@@ -554,7 +607,7 @@ export function ProviderPricingCard({
                   <button
                     type="button"
                     className="pricing-clear"
-                    disabled={newApiBusy || selecting}
+                    disabled={newApiBusy || !!selectingKey}
                     onClick={async () => {
                       setNewApiBusy(true);
                       try {
@@ -603,7 +656,7 @@ export function ProviderPricingCard({
                   <CandidateTable
                     model={model}
                     candidates={modelCandidates}
-                    selecting={!!selecting}
+                    selecting={!!selectingKey && selectingKey === `${providerId}|${model}`}
                     onSelect={(selectedModel, priceKey) =>
                       void onSelectCandidate?.(selectedModel, priceKey)
                     }
@@ -616,7 +669,7 @@ export function ProviderPricingCard({
                     <button
                       type="button"
                       className="pricing-clear"
-                      disabled={selecting}
+                      disabled={!!selectingKey && selectingKey === `${providerId}|${model}`}
                       onClick={() => void onResetSelection(model)}
                       title="清除该模型的价格源选择，回退到自动匹配或内置默认"
                     >

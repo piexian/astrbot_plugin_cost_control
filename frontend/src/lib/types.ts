@@ -350,7 +350,34 @@ export interface ProviderModelInfo {
   model?: string;
   type?: string;
   candidates: string[];
+  supplier_id?: string;
+  supplier_name?: string;
   matched_default?: MatchedDefault | null;
+}
+
+// 已从 AstrBot 配置删除、但仍有历史用量或自定义定价的 Provider 残留
+export interface DeletedProviderInfo {
+  provider_id: string;
+  tokens: number;
+  count: number;
+  has_pricing?: boolean;
+  models?: string[];
+  matched_default?: MatchedDefault | null;
+}
+
+// 按 provider_source_id 聚类的供应商目录（上游聚类布局）
+export interface PricingCluster {
+  id: string;
+  name: string;
+  provider_ids: string[];
+}
+
+// POST /actions/delete_provider_data 结果
+export interface DeleteProviderDataResult {
+  provider_id: string;
+  usage_deleted: number;
+  supplements_deleted: number;
+  pricing_deleted: boolean;
 }
 
 export interface PricingUnpriced {
@@ -464,8 +491,11 @@ export interface ExprValidateResult {
 
 export interface PricingResponse {
   provider_models?: ProviderModelInfo[];
+  deleted_providers?: DeletedProviderInfo[];
   user_pricing?: Record<string, UserPricingEntry>; // key=provider_id
   defaults?: Record<string, PriceEntry>; // key=模型名，per_token
+  pricing_clusters?: PricingCluster[];
+  pricing_multipliers?: Record<string, number>; // key=provider_source_id，缺省=1
   unpriced?: PricingUnpriced[];
   currency_symbol?: string;
   exchange_rates?: Record<string, number>;

@@ -5,10 +5,12 @@ import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
 import type {
   CandidateBrief,
+  DeletedProviderInfo,
   MatchedDefault,
   PriceEntry,
-  PriceSelection,
+  PricingCluster,
   PricingUnpriced,
+  PriceSelection,
   ProviderModelInfo,
   SourceStatus,
   UserPricingEntry,
@@ -16,32 +18,33 @@ import type {
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
 import { SaveToast } from "../components/SaveToast";
-import { Segmented } from "../components/Segmented";
 import { Loading, ErrorBox } from "../components/Feedback";
+import { PricingCatalog } from "../components/PricingCatalog";
 import {
   DraftEntry,
   ProviderPricingCard,
   draftToEntry,
   entryToDraft,
   isDraftEmpty,
+  normalizeDefaultCurrency,
 } from "../components/ProviderPricingCard";
 import { SourceStatusBar } from "../components/price/SourceStatusBar";
 
-// 卡片筛选（F6.7）：按生效价格来源归类
-type PricingFilter = "all" | "unpriced" | "candidates" | "selected" | "manual";
-
-const FILTER_OPTIONS: { value: PricingFilter; label: string }[] = [
-  { value: "all", label: "全部" },
-  { value: "unpriced", label: "未定价" },
-  { value: "candidates", label: "待选候选" },
-  { value: "selected", label: "已选源" },
-  { value: "manual", label: "手工定价" },
-];
+interface PricingDisplayProvider {
+  id: string;
+  type?: string;
+  candidates: string[];
+  matchedDefault: MatchedDefault | null;
+  isDeletedResidue?: boolean;
+}
 
 export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const res = useApi(() => api.getPricing(), [refreshNonce]);
   const data = res.data;
   const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
+  const [multiplierDrafts, setMultiplierDrafts] = useState<
+    Record<string, string>
+  >({});
   const [resetResult, setResetResult] = useState("");
   // 两段式确认：首次点击武装，4 秒内再次点击执行
   const [resetArmed, setResetArmed] = useState(false);
@@ -50,28 +53,60 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   // 跳转信号：点击未定价告警行时递增，传给对应 provider 卡片触发脉冲动画
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null);
   const [highlightSignal, setHighlightSignal] = useState(0);
+  const [selectedClusterId, setSelectedClusterId] = useState("");
   // 局部未定价告警覆盖：保存后单独刷新，避免整页 refetch 导致闪烁
   const [unpricedOverride, setUnpricedOverride] = useState<
     PricingUnpriced[] | null
   >(null);
-  const [filter, setFilter] = useState<PricingFilter>("all");
+  // 多源：同步/选取状态
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
-  const [selecting, setSelecting] = useState(false);
   const [autoSync, setAutoSync] = useState(false);
+  // 乐观更新覆盖：选取/取消后即时更新，避免整页 refetch 导致"等半天"
+  const [selectionsOverride, setSelectionsOverride] = useState<
+    Record<string, Record<string, PriceSelection>> | null
+  >(null);
+  const [candidatesOverride, setCandidatesOverride] = useState<
+    Record<string, Record<string, CandidateBrief[]>> | null
+  >(null);
+  const [autoSelectedOverride, setAutoSelectedOverride] = useState<
+    Record<string, Record<string, string>> | null
+  >(null);
+  // 正在选取/取消的 (provider|model) 键，按模型级 loading
+  const [selectingKey, setSelectingKey] = useState<string | null>(null);
+
+  // 新建草稿的默认计价货币：跟随主货币（后端 /pricing 已返回 currency_symbol）
+  const defaultCurrency = normalizeDefaultCurrency(data?.currency_symbol);
 
   useEffect(() => {
     if (!data) return;
     const next: Record<string, DraftEntry> = {};
     const userPricing = data.user_pricing || {};
     for (const [pid, entry] of Object.entries(userPricing)) {
-      next[pid] = entryToDraft(entry);
+      next[pid] = entryToDraft(entry, defaultCurrency);
     }
     setDrafts(next);
+    const nextMultipliers: Record<string, string> = {};
+    const currentClusterIds = new Set(
+      (data.pricing_clusters || []).map((cluster) => cluster.id),
+    );
+    for (const [clusterId, multiplier] of Object.entries(
+      data.pricing_multipliers || {},
+    )) {
+      if (currentClusterIds.size > 0 && !currentClusterIds.has(clusterId)) {
+        continue;
+      }
+      nextMultipliers[clusterId] = String(multiplier);
+    }
+    setMultiplierDrafts(nextMultipliers);
     setReady(true);
     setUnpricedOverride(null); // 新数据到达时清除覆盖
-  }, [data]);
+    setSelectionsOverride(null);
+    setCandidatesOverride(null);
+    setAutoSelectedOverride(null);
+  }, [data, defaultCurrency]);
 
+  // 读取 auto_sync 配置
   useEffect(() => {
     let mounted = true;
     void api
@@ -91,18 +126,18 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       mounted = false;
     };
   }, [refreshNonce]);
+
   const providerModels: ProviderModelInfo[] = data?.provider_models || [];
   const defaults: Record<string, PriceEntry> = data?.defaults || {};
   const unpriced = unpricedOverride ?? data?.unpriced ?? [];
   const sources: Record<string, SourceStatus> = data?.sources || {};
+  // 乐观更新：override 优先于 data
   const selections: Record<string, Record<string, PriceSelection>> =
-    data?.selections || {};
+    selectionsOverride ?? data?.selections ?? {};
   const candidateMap: Record<string, Record<string, CandidateBrief[]>> =
-    data?.candidates || {};
+    candidatesOverride ?? data?.candidates ?? {};
   const autoSelected: Record<string, Record<string, string>> =
-    data?.auto_selected || {};
-  const ensureDraft = (pid: string): DraftEntry =>
-    drafts[pid] ?? entryToDraft(undefined);
+    autoSelectedOverride ?? data?.auto_selected ?? {};
 
   // 当前配置中的 provider ID 集合
   const configIds = useMemo(
@@ -110,24 +145,37 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     [providerModels],
   );
 
-  // 已设过定价但不在当前配置中的「孤儿」provider
-  const orphanIds = Object.keys(drafts).filter(
-    (pid) => !configIds.has(pid),
-  );
-
-  // 从 unpriced 中提取不在当前配置中、也未在 drafts 中的「历史」provider
-  const historicalIds = useMemo(() => {
-    const seen = new Set([...configIds, ...orphanIds]);
-    const ids: string[] = [];
-    for (const u of unpriced) {
-      const pid = u.provider_id || "";
-      if (pid && !seen.has(pid)) {
-        seen.add(pid);
-        ids.push(pid);
+  // 后端返回所有「已从当前配置删除，但仍有历史用量或旧定价」的 Provider。
+  // 兼容旧后端：缺少 deleted_providers 字段时，仍从定价和未定价用量推导。
+  const deletedProviders = useMemo<DeletedProviderInfo[]>(() => {
+    if (data?.deleted_providers) return data.deleted_providers;
+    const byId = new Map<string, DeletedProviderInfo>();
+    for (const pid of Object.keys(drafts)) {
+      if (!configIds.has(pid)) {
+        byId.set(pid, {
+          provider_id: pid,
+          tokens: 0,
+          count: 0,
+          has_pricing: true,
+        });
       }
     }
-    return ids;
-  }, [unpriced, configIds, orphanIds]);
+    for (const u of unpriced) {
+      const pid = u.provider_id || "";
+      if (!pid || configIds.has(pid)) continue;
+      const item = byId.get(pid) || {
+        provider_id: pid,
+        tokens: 0,
+        count: 0,
+      };
+      item.tokens += u.tokens || 0;
+      item.count += u.count || 0;
+      byId.set(pid, item);
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => b.tokens - a.tokens || a.provider_id.localeCompare(b.provider_id),
+    );
+  }, [data?.deleted_providers, drafts, unpriced, configIds]);
 
   // 短名：取最后一个 / 后面的部分（如 newapi/image-ocr → image-ocr）
   const shortName = (id: string) => {
@@ -135,103 +183,73 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     return i >= 0 ? id.slice(i + 1) : id;
   };
 
-  // provider 是否已有生效的价格来源（已选或自动匹配）
-  const hasSourceSelection = (pid: string) => {
-    const sel = selections[pid];
-    if (sel && Object.keys(sel).length > 0) return true;
-    const auto = autoSelected[pid];
-    return !!auto && Object.keys(auto).length > 0;
-  };
+  const currentDisplayList = useMemo<PricingDisplayProvider[]>(
+    () =>
+      providerModels.map((p) => ({
+        id: p.id,
+        type: p.type,
+        candidates: p.candidates,
+        matchedDefault: p.matched_default ?? null,
+      })),
+    [providerModels],
+  );
 
-  // provider 是否存在待选候选
-  const hasCandidates = (pid: string) => {
-    const m = candidateMap[pid];
-    return !!m && Object.values(m).some((arr) => arr && arr.length > 0);
-  };
+  const deletedDisplayList = useMemo<PricingDisplayProvider[]>(
+    () =>
+      deletedProviders.map((p) => ({
+        id: p.provider_id,
+        type: undefined,
+        candidates: p.models || [],
+        matchedDefault: p.matched_default ?? null,
+        isDeletedResidue: true,
+      })),
+    [deletedProviders],
+  );
 
-  // 原始显示列表（去重前）
-  const rawList: {
-    id: string;
-    displayId: string;
-    type?: string;
-    candidates: string[];
-    matchedDefault: MatchedDefault | null;
-    isHistorical?: boolean;
-  }[] = [
-    ...providerModels.map((p) => ({
-      id: p.id,
-      displayId: p.id,
-      type: p.type,
-      candidates: p.candidates,
-      matchedDefault: p.matched_default ?? null,
-    })),
-    ...orphanIds.map((id) => ({
-      id,
-      displayId: id,
-      type: undefined,
-      candidates: [],
-      matchedDefault: null,
-    })),
-    ...historicalIds.map((id) => ({
-      id,
-      displayId: id,
-      type: undefined,
-      candidates: [],
-      matchedDefault: null,
-      isHistorical: true,
-    })),
-  ];
-
-  // 去重：按短名分组，如果多个 ID 共享同一短名（如 newapi/image-ocr 和 image-ocr），
-  // 保留最长 ID（更具体），displayId 用短名，删除较短的重复项
-  const displayList = useMemo(() => {
-    const byShort = new Map<string, typeof rawList>();
-    for (const item of rawList) {
-      const sn = shortName(item.displayId);
-      const existing = byShort.get(sn);
-      if (!existing) {
-        byShort.set(sn, [item]);
-      } else {
-        existing.push(item);
-      }
+  const pricingClusters = useMemo<PricingCluster[]>(() => {
+    if (data?.pricing_clusters?.length) {
+      return data.pricing_clusters
+        .map((cluster) => ({
+          ...cluster,
+          provider_ids: (cluster.provider_ids || []).filter((id) =>
+            configIds.has(id),
+          ),
+        }))
+        .filter((cluster) => cluster.provider_ids.length > 0);
     }
-    const result: typeof rawList = [];
-    for (const [, group] of byShort) {
-      if (group.length === 1) {
-        result.push(group[0]);
-      } else {
-        // 保留最长 ID，displayId 用短名
-        group.sort((a, b) => b.id.length - a.id.length);
-        const kept = { ...group[0], displayId: shortName(group[0].displayId) };
-        result.push(kept);
-      }
+    const grouped = new Map<string, PricingCluster>();
+    for (const provider of providerModels) {
+      const id = provider.supplier_id || provider.id;
+      const cluster = grouped.get(id) || {
+        id,
+        name: provider.supplier_name || id,
+        provider_ids: [],
+      };
+      cluster.provider_ids.push(provider.id);
+      grouped.set(id, cluster);
     }
-    return result;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerModels, orphanIds, historicalIds]);
+    return Array.from(grouped.values());
+  }, [data?.pricing_clusters, providerModels, configIds]);
 
-  // 筛选后的卡片列表（F6.7）
-  const filteredList = useMemo(() => {
-    if (filter === "all") return displayList;
-    return displayList.filter((p) => {
-      const manual = !isDraftEmpty(ensureDraft(p.id));
-      switch (filter) {
-        case "manual":
-          return manual;
-        case "selected":
-          return !manual && hasSourceSelection(p.id);
-        case "candidates":
-          return hasCandidates(p.id);
-        case "unpriced":
-          return !manual && !p.matchedDefault && !hasSourceSelection(p.id);
-        default:
-          return true;
-      }
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayList, filter, drafts, selections, autoSelected, candidateMap]);
+  useEffect(() => {
+    if (!pricingClusters.some((cluster) => cluster.id === selectedClusterId)) {
+      setSelectedClusterId(pricingClusters[0]?.id ?? "");
+    }
+  }, [pricingClusters, selectedClusterId]);
 
-  // 未定价告警按 provider_id 分组（去重后），用于可点击跳转
+  const currentProviderById = useMemo(
+    () => new Map(currentDisplayList.map((provider) => [provider.id, provider])),
+    [currentDisplayList],
+  );
+  const clusterIdByProvider = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const cluster of pricingClusters) {
+      for (const providerId of cluster.provider_ids) map.set(providerId, cluster.id);
+    }
+    return map;
+  }, [pricingClusters]);
+
+  // 未定价告警按精确 provider_id 分组，用于可点击跳转
   const unpricedByProvider = useMemo(() => {
     type UGroup = { models: typeof unpriced; totalTokens: number };
     const map = new Map<string, UGroup>();
@@ -242,43 +260,26 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       group.totalTokens += u.tokens || 0;
       map.set(pid, group);
     }
-    // 按短名合并：newapi/image-ocr 和 image-ocr 合并为一行
-    const byShort = new Map<string, UGroup & { fullId: string }>();
-    for (const [pid, group] of map) {
-      const sn = shortName(pid);
-      const existing = byShort.get(sn);
-      if (!existing) {
-        byShort.set(sn, { ...group, fullId: pid });
-      } else {
-        existing.models.push(...group.models);
-        existing.totalTokens += group.totalTokens;
-        if (pid.length > existing.fullId.length) existing.fullId = pid;
-      }
-    }
-    return Array.from(byShort.entries())
-      .map(([, g]) => [g.fullId, g] as [string, UGroup])
-      .sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+    return Array.from(map.entries()).sort(
+      (a, b) => b[1].totalTokens - a[1].totalTokens,
+    );
   }, [unpriced]);
 
-  // 存在未定价用量的 provider ID 及短名集合，用于卡片背景色判定
+  // 存在未定价用量的精确 provider ID 集合，用于卡片背景色判定
   const unpricedIdSet = useMemo(() => {
     const s = new Set<string>();
     for (const u of unpriced) {
       const pid = u.provider_id || "";
-      if (pid) {
-        s.add(pid);
-        s.add(shortName(pid));
-      }
+      if (pid) s.add(pid);
     }
     return s;
   }, [unpriced]);
 
-  const hasUnpricedUsage = (pid: string) =>
-    unpricedIdSet.has(pid) || unpricedIdSet.has(shortName(pid));
+  const hasUnpricedUsage = (pid: string) => unpricedIdSet.has(pid);
 
   const updateDraft = (pid: string, patch: Partial<DraftEntry>) =>
     setDrafts((prev) => {
-      const cur = prev[pid] ?? entryToDraft(undefined);
+      const cur = prev[pid] ?? entryToDraft(undefined, defaultCurrency);
       return { ...prev, [pid]: { ...cur, ...patch } };
     });
   const clearDraft = (pid: string) =>
@@ -287,6 +288,11 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       delete next[pid];
       return next;
     });
+  const ensureDraft = (pid: string): DraftEntry =>
+    drafts[pid] ?? entryToDraft(undefined, defaultCurrency);
+
+  const updateMultiplier = (clusterId: string, value: string) =>
+    setMultiplierDrafts((prev) => ({ ...prev, [clusterId]: value }));
 
   const collect = (): Record<string, UserPricingEntry> => {
     const out: Record<string, UserPricingEntry> = {};
@@ -298,23 +304,50 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     return out;
   };
 
+  const collectMultipliers = (): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [clusterId, raw] of Object.entries(multiplierDrafts)) {
+      const multiplier = Number(raw);
+      if (
+        !Number.isFinite(multiplier) ||
+        multiplier < 0.01 ||
+        multiplier > 100
+      ) {
+        throw new Error("聚类倍率必须在 0.01–100 之间");
+      }
+      if (Math.abs(multiplier - 1) > 1e-12) out[clusterId] = multiplier;
+    }
+    return out;
+  };
+
   const payload = useMemo<{
     pricing: Record<string, UserPricingEntry> | null;
+    pricing_multipliers: Record<string, number> | null;
     error?: string;
   }>(() => {
     try {
-      return { pricing: collect() };
+      return {
+        pricing: collect(),
+        pricing_multipliers: collectMultipliers(),
+      };
     } catch (e) {
-      return { pricing: null, error: e instanceof Error ? e.message : String(e) };
+      return {
+        pricing: null,
+        pricing_multipliers: null,
+        error: e instanceof Error ? e.message : String(e),
+      };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drafts]);
+  }, [drafts, multiplierDrafts]);
 
-  const { status, error } = useAutoSave(
+  const { status, error, flush } = useAutoSave(
     payload,
     async (p) => {
       if (p.error) throw new Error(p.error);
-      await api.postSaveConfig({ pricing: p.pricing });
+      await api.postSaveConfig({
+        pricing: p.pricing,
+        pricing_multipliers: p.pricing_multipliers,
+      });
       // 局部刷新未定价告警，避免整页 refetch 导致闪烁
       try {
         const fresh = await api.getPricing();
@@ -326,8 +359,21 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     { enabled: ready },
   );
 
-  // ---- 价格源操作（F1/F2） ----
+  const deleteResidualData = async (providerId: string) => {
+    // 先落盘其它尚在防抖期内的价格修改，避免删除后刷新覆盖用户刚输入的内容。
+    if (status === "saving") {
+      throw new Error("价格配置正在保存，请稍后再试");
+    }
+    await flush();
+    await api.postDeleteProviderData(providerId);
+    setUnpricedOverride(null);
+    res.refetch();
+  };
 
+  if (res.loading && !data) return <Loading />;
+  if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
+
+  // 多源：同步
   const doSync = async (sourceIds?: string[]) => {
     setSyncing(true);
     setSyncMsg("同步中…");
@@ -356,7 +402,6 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       setSyncMsg(`❌ 更新自动同步失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
-
   // 源开关：读最新 config → 改 price_sources → 保存 → 启用时立即拉该源
   const toggleSource = async (sourceId: string, enabled: boolean) => {
     try {
@@ -379,10 +424,9 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       setSyncMsg(`❌ 更新价格源失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
-
   // 探测并启用 New API 源（F1.2/F6.2）
   const enableNewApiSource = async (pid: string) => {
-    setSelecting(true);
+    setSelectingKey(`${pid}|`);
     setSyncMsg(`探测 ${pid} …`);
     try {
       const det = await api.postPricingDetect(pid);
@@ -404,36 +448,71 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     } catch (e) {
       setSyncMsg(`❌ 探测失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setSelecting(false);
+      setSelectingKey(null);
     }
   };
-
   const disableNewApiSource = async (pid: string) => {
     await toggleSource(`newapi:${pid}`, false);
     setSyncMsg(`已停用 New API 源 ${pid}（已确认的选择不受影响）`);
   };
 
-  const selectCandidate = async (pid: string, model: string, priceKey: string) => {
-    setSelecting(true);
+  // 乐观更新：选取后用返回值即时更新本地 override，不调 res.refetch()
+  const selectCandidate = async (
+    pid: string,
+    model: string,
+    priceKey: string,
+  ) => {
+    const key = `${pid}|${model}`;
+    setSelectingKey(key);
     try {
-      await api.postPricingSelect({ provider_id: pid, model, price_key: priceKey });
-      res.refetch();
+      const { selected } = await api.postPricingSelect({
+        provider_id: pid,
+        model,
+        price_key: priceKey,
+      });
+      // 即时更新 override
+      setSelectionsOverride((prev) => ({
+        ...(prev ?? data?.selections ?? {}),
+        [pid]: { ...((prev ?? data?.selections ?? {})[pid] ?? {}), [model]: selected },
+      }));
+      // 候选/自动匹配移除该 model
+      setCandidatesOverride((prev) => {
+        const base = prev ?? data?.candidates ?? {};
+        const forPid = { ...(base[pid] ?? {}) };
+        delete forPid[model];
+        return { ...base, [pid]: forPid };
+      });
+      setAutoSelectedOverride((prev) => {
+        const base = prev ?? data?.auto_selected ?? {};
+        const forPid = { ...(base[pid] ?? {}) };
+        delete forPid[model];
+        return { ...base, [pid]: forPid };
+      });
     } catch (e) {
       setSyncMsg(`❌ 选用失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setSelecting(false);
+      setSelectingKey(null);
     }
   };
-
+  // 乐观更新：取消选择，用返回值即时移除
   const resetSelection = async (pid: string, model: string) => {
-    setSelecting(true);
+    const key = `${pid}|${model}`;
+    setSelectingKey(key);
     try {
       await api.postPricingSelectReset({ provider_id: pid, model });
+      setSelectionsOverride((prev) => {
+        const base = prev ?? data?.selections ?? {};
+        const forPid = { ...(base[pid] ?? {}) };
+        delete forPid[model];
+        return { ...base, [pid]: forPid };
+      });
+      // 取消后该 model 回到无选择状态；候选/自动匹配需 refetch 才能恢复，
+      // 但为避免"等半天"，触发一次后台静默 refetch 对齐数据（不阻塞 UI）
       res.refetch();
     } catch (e) {
       setSyncMsg(`❌ 清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setSelecting(false);
+      setSelectingKey(null);
     }
   };
 
@@ -444,9 +523,6 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     if (st) return { sourceId: sid, enabled: !!st.enabled };
     return undefined;
   };
-
-  if (res.loading && !data) return <Loading />;
-  if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
   const reset = async () => {
     // 两段式确认：首次点击武装，4 秒内再次点击执行（替代 confirm，兼容嵌入式 webview）
@@ -464,7 +540,7 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     setResetArmed(false);
     setResetResult("重置中…");
     try {
-      await api.postSaveConfig({ pricing: {} });
+      await api.postSaveConfig({ pricing: {}, pricing_multipliers: {} });
       setResetResult("✅ 已重置，立即生效");
       res.refetch();
     } catch (e) {
@@ -474,6 +550,8 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
 
   // 点击未定价告警行 → 跳转到对应 provider 卡片
   const jumpToProvider = (pid: string) => {
+    const clusterId = clusterIdByProvider.get(pid);
+    if (clusterId) setSelectedClusterId(clusterId);
     setHighlightTarget(pid);
     setHighlightSignal((s) => s + 1);
   };
@@ -481,11 +559,43 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const defaultKeys = Object.keys(defaults).sort();
 
   // 统计概要数字
-  const totalProviders = displayList.length;
-  const unmatchedCount = displayList.filter(
-    (p) => !p.matchedDefault && !hasSourceSelection(p.id),
+  const totalProviders = currentDisplayList.length;
+  const unmatchedCount = currentDisplayList.filter(
+    (p) => !p.matchedDefault && isDraftEmpty(ensureDraft(p.id)),
   ).length;
-  const candidateProviderCount = displayList.filter((p) => hasCandidates(p.id)).length;
+
+  const renderProviderCard = (p: PricingDisplayProvider) => (
+    <ProviderPricingCard
+      key={p.id}
+      providerId={p.id}
+      type={p.type}
+      candidates={p.candidates}
+      draft={ensureDraft(p.id)}
+      matchedDefault={p.matchedDefault}
+      hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
+      isDeletedResidue={p.isDeletedResidue}
+      hasUsage={hasUnpricedUsage(p.id)}
+      highlightSignal={highlightTarget === p.id ? highlightSignal : undefined}
+      selections={selections[p.id]}
+      autoPriceKeys={autoSelected[p.id]}
+      priceCandidatesByModel={candidateMap[p.id]}
+      newApiSource={p.isDeletedResidue ? undefined : newApiSourceFor(p.id)}
+      selectingKey={selectingKey ?? undefined}
+      onSelectCandidate={(m, pk) => selectCandidate(p.id, m, pk)}
+      onResetSelection={(m) => resetSelection(p.id, m)}
+      onEnableNewApiSource={
+        p.isDeletedResidue ? undefined : () => enableNewApiSource(p.id)
+      }
+      onDisableNewApiSource={
+        p.isDeletedResidue ? undefined : () => disableNewApiSource(p.id)
+      }
+      onChange={(patch) => updateDraft(p.id, patch)}
+      onClear={() => clearDraft(p.id)}
+      onDeleteData={
+        p.isDeletedResidue ? () => deleteResidualData(p.id) : undefined
+      }
+    />
+  );
 
   return (
     <div>
@@ -511,16 +621,18 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
           </div>
           <div className="unpriced-groups">
             {unpricedByProvider.map(([pid, group]) => {
-              const isHistorical = !configIds.has(pid) && !drafts[pid];
+              const isDeletedResidue = !configIds.has(pid);
               return (
                 <div
                   key={pid}
-                  className={`unpriced-group-row ${isHistorical ? "is-historical" : ""}`}
+                  className={`unpriced-group-row ${isDeletedResidue ? "is-deleted-residue" : ""}`}
                   onClick={() => jumpToProvider(pid)}
-                  title={isHistorical ? "该 Provider 已不在当前配置中，点击仍可设置定价" : "点击跳转到定价卡片"}
+                  title={isDeletedResidue ? "该 Provider 已从当前配置删除，点击查看残留数据" : "点击跳转到定价卡片"}
                 >
                   <span className="mono unpriced-pid">{shortName(pid) || "(未知)"}</span>
-                  {isHistorical && <span className="unpriced-historical-tag">历史</span>}
+                  {isDeletedResidue && (
+                    <span className="unpriced-residue-tag">已删除供应商残留</span>
+                  )}
                   <span className="unpriced-models">
                     {group.models.length} 个模型
                   </span>
@@ -535,81 +647,44 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
         </Panel>
       )}
 
-      <Panel>
+      <Panel className="pricing-catalog-panel">
         <div className="pricing-header">
-          <h2>Provider 定价</h2>
+          <h2>供应商定价</h2>
           <div className="pricing-header-stats">
-            <span className="muted small">{totalProviders} 个 Provider</span>
+            <span className="muted small">
+              {pricingClusters.length} 个 AstrBot 供应商 · {totalProviders}{" "}
+              个现有模型配置
+            </span>
             {unmatchedCount > 0 && (
               <span className="pricing-unmatched-count">
-                {unmatchedCount} 个无价格匹配
-              </span>
-            )}
-            {candidateProviderCount > 0 && (
-              <span className="pricing-unmatched-count">
-                {candidateProviderCount} 个有待选候选
+                {unmatchedCount} 个未定价
               </span>
             )}
           </div>
         </div>
-        <div className="muted small" style={{ marginBottom: 8 }}>
-          按 <strong>provider_id</strong> 设置定价。未设置时依次使用：已选价格源 → 自动匹配 → 内置默认。
-          修改后自动保存、即时热生效，告警同步更新。
+        <div className="muted small pricing-catalog-help">
+          仅显示 AstrBot 当前配置中的 Provider/模型，并按{" "}
+          <strong>provider_source_id</strong>{" "}
+          聚类。同一供应商的模型集中在右侧；内置价格只作为现有模型的默认匹配，展开卡片即可直接覆盖。
         </div>
-        <div style={{ marginBottom: 8 }}>
-          <Segmented
-            options={FILTER_OPTIONS}
-            value={filter}
-            onChange={(v) => setFilter(v as PricingFilter)}
-            variant="weak"
+        {pricingClusters.length > 0 ? (
+          <PricingCatalog
+            clusters={pricingClusters}
+            selectedId={selectedClusterId}
+            onSelect={setSelectedClusterId}
+            multipliers={multiplierDrafts}
+            onMultiplierChange={updateMultiplier}
+            renderProvider={(providerId) => {
+              const provider = currentProviderById.get(providerId);
+              return provider ? renderProviderCard(provider) : null;
+            }}
           />
-        </div>
-        {displayList.length === 0 && (
+        ) : (
           <div className="muted small" style={{ margin: "8px 0" }}>
-            未获取到当前 AstrBot 的 provider 配置。可在 AstrBot 主配置添加 provider 后重载插件。
+            未获取到当前 AstrBot 的 provider 配置。可在 AstrBot
+            主配置添加 provider 后重载插件。
           </div>
         )}
-        <div className="overrides-list">
-          {filteredList.map((p) => {
-            return (
-              <ProviderPricingCard
-                key={p.id}
-                providerId={p.id}
-                displayId={p.displayId}
-                type={p.type}
-                candidates={p.candidates}
-                draft={ensureDraft(p.id)}
-                matchedDefault={p.matchedDefault}
-                hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
-                isHistorical={p.isHistorical}
-                hasUsage={hasUnpricedUsage(p.id)}
-                highlightSignal={
-                  highlightTarget === p.id ? highlightSignal : undefined
-                }
-                selections={selections[p.id]}
-                autoPriceKeys={autoSelected[p.id]}
-                priceCandidatesByModel={candidateMap[p.id]}
-                newApiSource={p.isHistorical ? undefined : newApiSourceFor(p.id)}
-                selecting={selecting}
-                onSelectCandidate={(m, pk) => selectCandidate(p.id, m, pk)}
-                onResetSelection={(m) => resetSelection(p.id, m)}
-                onEnableNewApiSource={
-                  p.isHistorical ? undefined : () => enableNewApiSource(p.id)
-                }
-                onDisableNewApiSource={
-                  p.isHistorical ? undefined : () => disableNewApiSource(p.id)
-                }
-                onChange={(patch) => updateDraft(p.id, patch)}
-                onClear={() => clearDraft(p.id)}
-              />
-            );
-          })}
-          {filteredList.length === 0 && displayList.length > 0 && (
-            <div className="muted small" style={{ margin: "8px 0" }}>
-              当前筛选条件下没有 Provider。
-            </div>
-          )}
-        </div>
         <div className="row" style={{ marginTop: 8, gap: 10, alignItems: "center" }}>
           <Button
             onClick={reset}
@@ -621,6 +696,23 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
           <span className="muted">{resetResult}</span>
         </div>
       </Panel>
+
+      {deletedDisplayList.length > 0 && (
+        <Panel>
+          <div className="pricing-header">
+            <h2>已删除供应商残留</h2>
+            <span className="muted small">
+              {deletedDisplayList.length} 个已不在 AstrBot 配置中的 Provider
+            </span>
+          </div>
+          <div className="pricing-residue-help">
+            以下内容不属于当前供应商聚类，仅用于清理历史用量、补充记录和旧定价。
+          </div>
+          <div className="overrides-list">
+            {deletedDisplayList.map(renderProviderCard)}
+          </div>
+        </Panel>
+      )}
 
       {defaultKeys.length > 0 && (
         <details className="panel">
