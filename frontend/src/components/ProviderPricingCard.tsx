@@ -532,12 +532,14 @@ export function ProviderPricingCard({
           {deleteError && <span className="pricing-delete-error">{deleteError}</span>}
           {!expanded && (
             <span className="pricing-collapsed-summary">
-              {collapsedSummary(
-                draft,
-                matchedDefault ?? null,
-                !!hasUserOverride,
-                activeSelection?.price ?? null,
-              )}
+              {selectingKey?.startsWith(`${providerId}|`)
+                ? "加载中…"
+                : collapsedSummary(
+                    draft,
+                    matchedDefault ?? null,
+                    !!hasUserOverride,
+                    activeSelection?.price ?? null,
+                  )}
             </span>
           )}
           {!expanded && (

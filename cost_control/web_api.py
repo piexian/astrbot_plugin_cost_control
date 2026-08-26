@@ -77,6 +77,17 @@ def _iso_utc(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
+
+
+def _attach_selection_price(sel: dict[str, Any], catalog: Any) -> None:
+    """给单个 selection 条目附生效价格摘要（prompt/completion → input/output 映射）。"""
+    from .cost import _catalog_field_values
+
+    entry = catalog.prices.get(str(sel.get("price_key") or ""))
+    if entry is not None:
+        sel["price"] = _catalog_field_values(entry.to_dict())
+
+
 def _deleted_provider_residues(
     provider_models: list[dict[str, Any]],
     usage_by_provider: dict[str, dict[str, int]],
@@ -1584,7 +1595,6 @@ class WebApiMixin:
             auto_selected: dict[str, Any] = {}
             try:
                 from .config import get_price_selections, get_price_sources
-                from .cost import _catalog_field_values
                 from .price_catalog import select_auto_candidate
 
                 cat = self._load_catalog()
@@ -1608,15 +1618,12 @@ class WebApiMixin:
                     status["enabled"] = bool(config.get("enabled"))
                 selections = get_price_selections(_pcfg)
                 # 附生效价格摘要，前端已选价直接回显，无需另查 catalog
-                for _pid, _per_model in selections.items():
+                for _per_model in selections.values():
                     if not isinstance(_per_model, dict):
                         continue
-                    for _m, _sel in _per_model.items():
-                        if not isinstance(_sel, dict):
-                            continue
-                        _entry = cat.prices.get(str(_sel.get("price_key") or ""))
-                        if _entry is not None:
-                            _sel["price"] = _catalog_field_values(_entry.to_dict())
+                    for _sel in _per_model.values():
+                        if isinstance(_sel, dict):
+                            _attach_selection_price(_sel, cat)
                 for p in provider_models:
                     pid = p.get("id") or ""
                     if not pid:
@@ -1887,6 +1894,7 @@ class WebApiMixin:
             cfg["price_selections"] = sel
             save_plugin_config(self._pricing_data_dir(), cfg)
             self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            _attach_selection_price(sel[pid][model], cat)
             return self._ok({"selected": sel[pid][model]})
         except Exception as e:
             return self._err(str(e))

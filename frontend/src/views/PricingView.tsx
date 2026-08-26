@@ -488,6 +488,8 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
         delete forPid[model];
         return { ...base, [pid]: forPid };
       });
+      // 后台静默对齐一次全量数据（聚合计数/未定价等由服务端重算），不阻塞交互
+      res.refetch();
     } catch (e) {
       setSyncMsg(`❌ 选用失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
