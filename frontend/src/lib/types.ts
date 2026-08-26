@@ -448,6 +448,13 @@ export interface PriceSelection {
   auto: boolean;
   score: number;
   reason: string;
+  /** 生效价格摘要（后端从 catalog 附带），供输入框回显 */
+  price?: {
+    input: number | null;
+    input_cached: number | null;
+    output: number | null;
+    cache_creation: number | null;
+  };
 }
 
 // POST /pricing/sync 报告

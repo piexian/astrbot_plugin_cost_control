@@ -321,6 +321,25 @@ def test_priority_default_fallback():
     assert rule["mode"] == "per_token" and rule["input"] == 2.5
 
 
+def test_selection_effective_without_user_pricing():
+    """无任何手工定价时，已确认的候选选择仍必须生效（回归：曾因嵌在 user 判断内失效）。"""
+    catalog = {"or:gpt-4o": {"mode": "per_token", "input": 1.0, "output": 2.0}}
+    selections = {
+        "prov": {
+            "gpt-4o": {
+                "price_key": "or:gpt-4o",
+                "confirmed": True,
+                "auto": False,
+                "score": 1,
+                "reason": "exact",
+            }
+        }
+    }
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full(None, catalog, selections))
+    assert rule is not None
+    assert rule["mode"] == "per_token" and rule["input"] == 1.0
+
+
 def test_model_scoped_key_not_fuzzy_matched():
     # "prov|gpt-4o" 是模型级精确 key，不应被 provider 模糊匹配命中其它模型
     user = {"prov|gpt-4o": {"mode": "per_turn", "price": 0.5}}

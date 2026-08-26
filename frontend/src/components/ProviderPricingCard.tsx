@@ -362,9 +362,17 @@ export function ProviderPricingCard({
   const curSym = currencyToSymbol(curCode);
 
   const placeholder = (field: keyof DraftEntry): string => {
-    if (field === "price" || !matchedDefault?.entry) return "";
-    const v = matchedDefault.entry[field as keyof PriceEntry];
-    return v != null ? String(v) : "";
+    if (field === "price") return "";
+    // 已选/自动来源价优先回显，其次内置默认
+    const active = activeSelection?.price ?? null;
+    if (active) {
+      const v = active[field as keyof NonNullable<PriceSelection["price"]>];
+      if (v != null) return String(v);
+      return "";
+    }
+    if (!matchedDefault?.entry) return "";
+    const dv = matchedDefault.entry[field as keyof PriceEntry];
+    return dv != null ? String(dv) : "";
   };
 
   const setMode = (mode: PricingMode) => {

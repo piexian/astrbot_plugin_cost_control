@@ -1606,6 +1606,22 @@ class WebApiMixin:
                     )
                     status["enabled"] = bool(config.get("enabled"))
                 selections = get_price_selections(_pcfg)
+                # 附生效价格摘要，前端已选价直接回显，无需另查 catalog
+                for _pid, _per_model in selections.items():
+                    if not isinstance(_per_model, dict):
+                        continue
+                    for _m, _sel in _per_model.items():
+                        if not isinstance(_sel, dict):
+                            continue
+                        _entry = cat.prices.get(str(_sel.get("price_key") or ""))
+                        if _entry is not None:
+                            _d = _entry.to_dict()
+                            _sel["price"] = {
+                                "input": _d.get("input"),
+                                "input_cached": _d.get("input_cached"),
+                                "output": _d.get("output"),
+                                "cache_creation": _d.get("cache_creation"),
+                            }
                 for p in provider_models:
                     pid = p.get("id") or ""
                     if not pid:

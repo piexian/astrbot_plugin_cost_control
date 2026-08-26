@@ -143,20 +143,22 @@ def resolve_pricing(
         ``tiered_expr``），或 ``None``。
     """
     user = pricing.get("user") if isinstance(pricing, dict) else None
+    user = user if isinstance(user, dict) else {}
     rule: dict[str, Any] | None = None
-    if isinstance(user, dict) and provider_id:
+    if provider_id and model:
         # 1. 模型级手工价（精确 key）
-        if model:
-            exact = user.get(f"{provider_id}|{model}")
-            if isinstance(exact, dict) and exact.get("mode"):
-                return _apply_cluster_multiplier(
-                    _inherit_per_token(exact, provider_id, model, pricing), provider_id, pricing
-                )
-        # 2. 候选价格（用户确认 / 自动匹配）
+        exact = user.get(f"{provider_id}|{model}")
+        if isinstance(exact, dict) and exact.get("mode"):
+            return _apply_cluster_multiplier(
+                _inherit_per_token(exact, provider_id, model, pricing), provider_id, pricing
+            )
+    # 2. 候选价格（用户确认 / 自动匹配）——不依赖手工定价存在
+    if provider_id:
         sel = _resolve_selection(provider_id, model, pricing)
         if sel is not None:
             return _apply_cluster_multiplier(sel, provider_id, pricing)
-        # 3. 旧 provider 级手工价（模糊，排除模型级 key）
+    # 3. 旧 provider 级手工价（模糊，排除模型级 key）
+    if provider_id:
         legacy = {k: v for k, v in user.items() if "|" not in k}
         key = _best_match_key(provider_id, legacy)
         if key is not None:
