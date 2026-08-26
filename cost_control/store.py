@@ -6,8 +6,6 @@
 设计决策：补充数据（每请求的 cache_creation、归因注入量、user_id 等原生 ``ProviderStat``
 没有的字段）存独立 sqlite，与 AstrBot 主库解耦——零 schema 干扰、astrbot 升级免疫。
 与 ``ProviderStat`` 的关联在应用层按 ``umo + provider_id + created_at`` 完成。
-
-阶段 1 实现。
 """
 
 from __future__ import annotations
@@ -62,7 +60,7 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     # 原始 usage（provider 原生结构的序列化，供缓存诊断排查）
     raw_usage: dict[str, Any] | None = Field(default=None, sa_type=JSON)
 
-    # 归因（阶段 3 填充）
+    # 归因结果
     injection_total: int | None = Field(default=None)
     attribution: dict[str, Any] | None = Field(default=None, sa_type=JSON)
 

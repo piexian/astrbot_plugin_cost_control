@@ -9,8 +9,6 @@
 配合 ``persistent=False``（不持久化 handler 引用，由插件生命周期自管理）。
 
 cron 触发时按 ``handler()`` 无参调用（``payload`` 为空）。
-
-阶段 2 实现。
 """
 
 from __future__ import annotations

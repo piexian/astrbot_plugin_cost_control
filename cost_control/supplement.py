@@ -10,8 +10,6 @@
 （Anthropic Message / OpenAI ChatCompletion / OpenAI Response（Responses API）/
 Google GenerateContentResponse），cache 字段命名各异，按 duck-typing 兼容，
 解析失败降级为 None。
-
-阶段 1 实现。
 """
 
 from __future__ import annotations

@@ -12,8 +12,6 @@
 运行时由 ``Main`` 合并为 ``self.cfg`` 供读取；``_conf_schema.json`` 仅保留总开关
 ``enabled``，其余所有参数（含各功能开关与详细配置）均由仪表盘「设置」页编辑并写入
 ``config.json``。
-
-阶段 1：默认值结构 + 定价表 + 读取函数 + 插件自有配置文件读写。
 """
 
 from __future__ import annotations

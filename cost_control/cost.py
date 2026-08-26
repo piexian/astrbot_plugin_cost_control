@@ -244,8 +244,8 @@ def _resolve_selection(
         source_filter = (
             set(enabled_sources) if isinstance(enabled_sources, (list, set, tuple)) else None
         )
-        # 预算表优先：get_pricing 已按 (provider, model) 算好自动匹配，热路径零模糊匹配；
-        # 未命中（未配置 provider / 预算失败）才回退实时匹配，实时路径走候选缓存。
+        # get_pricing 已按 (provider, model) 预算自动匹配，热路径直接查表；
+        # 未命中才回退实时匹配（走 find_candidates 缓存）。
         auto_selected = pricing.get("auto_selected")
         if isinstance(auto_selected, dict):
             pids = (provider_id, None) if provider_id else (None,)
@@ -361,7 +361,7 @@ def _catalog_price_to_rule(price: dict[str, Any]) -> dict[str, Any] | None:
 def _inherit_per_token(
     rule: dict[str, Any], provider_id: str | None, model: str | None, pricing: dict[str, Any]
 ) -> dict[str, Any]:
-    """用户 per_token 未配置字段从候选/默认价继承；无回落时缺省字段按 0（旧行为）。
+    """用户 per_token 未配置字段从候选/默认价继承；无回落时缺省字段按 0。
 
     仅作用于带 ``configured`` 标志的用户 per_token 规则；defaults/catalog 规则字段完整
     （无 ``configured``），直接返回。
@@ -759,8 +759,7 @@ class CostMixin:
     ) -> dict[str, dict[str, str]]:
         """按 (provider_id, model) 预算自动匹配价格键，供热路径查表。
 
-        与 /pricing 端点的实时预算同口径：主模型 + model_list 启用项，跳过已
-        确认选择；候选经缓存后仅未见过的新模型名触发全量遍历。
+        与 /pricing 端点的实时计算同口径：主模型 + model_list 启用项，跳过已确认选择。
         """
         from .price_catalog import select_auto_candidate
 
